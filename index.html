@@ -1,0 +1,1798 @@
+<!doctype html>
+<!--
+  Duel — OBS browser source
+  -------------------------
+  A chatter types "!duel somebody" and a little pixel-art Old West town grows in along the bottom of the screen
+  against a sunset: a saloon with horses tied up out front, a jail, a bank, a hotel and a general store, cacti
+  and tumbleweeds on a strip of see-through ground. The two of them walk out of the saloon's swinging doors into
+  the middle of the street, stand back to back, take five paces, turn and draw... water pistols. The winner
+  soaks the loser (whose own pistol only dribbles), knocks their hat off and takes a bow. Nobody gets hurt. Then
+  it all shrinks away again and the sun sets, and there's nothing on screen until the next duel. After a duel
+  there's a cooldown before the next one can start.
+
+  Everything is a full 3D voxel model, seen flat on with no perspective, so it looks like 2D pixel art; only the
+  ground shows a little depth (the 2.5D look). You see the models are solid when they turn, or twist as they
+  grow in and out. Twitch chatters who have set pronouns with the Chat Pronouns extension get a cowboy (he/him)
+  or a cowgirl (she/her); everyone else gets either.
+
+  OBS: Add > Browser, URL https://duel.ixitxachitl.com/?channel=yourchannel, at your canvas size (e.g.
+       1920x1080). The background is transparent inside OBS.
+
+  CONTROLS: in OBS, right-click this source → Interact and move the mouse over the overlay. The bar in the
+  bottom-right corner starts a duel between two names you type; the gear opens the settings. Every setting
+  can also be a URL parameter, which overrides it.
+
+  Chat (all read anonymously, no login needed):
+    channel   Twitch channel          kick      Kick channel
+    tiktok    TikTok bridge: 1 = TikFinity on this PC, or a ws:// address
+    youtube   a live video ID or link (needs ytkey), or a ws:// bridge
+    ytkey     YouTube Data API v3 key ytpoll    seconds between YouTube checks (default 6)
+    demo      1 = fake chatters duel every few seconds, for trying it out
+
+  Duels:
+    cmd       the command (default !duel). "!duel name" duels that chatter; "!duel" on its own picks someone.
+              You can only duel someone who has chatted in the last 10 minutes.
+    cooldown  seconds after a duel before the next one can start (default 60). The broadcaster skips it.
+    modskip   1 = mods skip the cooldown too (default 0)
+    who       who can start one besides the broadcaster: everyone (default), vips (mods and VIPs), mods or
+              owner (only the broadcaster)
+    allow     more names that can start one, comma separated
+    pronouns  1 = look up Twitch chatters' pronouns at pronouns.alejo.io to pick a cowboy or cowgirl (default 1)
+
+  Look:
+    pixel     screen pixels per art pixel (default 0 = about 1/150 of the source's height: 7 at 1080p)
+    names     1 = show the duelers' names (default 1)
+    hold      seconds the winner stays up before it all goes away (default 4)
+    volume    0-100 sound effects (default 50; 0 = silent)
+    bg        testing: none = transparent in a normal browser too, or a color (default: dark outside OBS)
+
+  Custom integrations (Streamer.bot, etc.) can call window.duel.start(challenger, opponent, { winner }) and
+  window.duel.stop(). (winner is 1 for the challenger, 2 for the opponent; otherwise it's a coin flip.)
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Duel</title>
+<link href="https://fonts.googleapis.com/css2?family=Bangers&family=Comic+Neue:wght@700&family=Pixelify+Sans:wght@600&family=Rye&display=swap" rel="stylesheet">
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }</script>
+<style>
+  html,body{margin:0;padding:0;background:transparent;overflow:hidden;width:100%;height:100%}
+  :root{--ink:#111;--paper:#fff;--yellow:#fff27a;--pink:#ff2bd6;--violet:#7a5cff;--cyan:#00e5ff;--green:#39ff88;--sun:#ffe600;
+    --dots:radial-gradient(circle,rgba(0,0,0,.13) 1.2px,transparent 1.7px) 0 0/8px 8px;
+    --head:'Bangers',Impact,sans-serif;--txt:'Comic Neue',system-ui,sans-serif;--p:7px}
+  #c{position:fixed;display:none;image-rendering:pixelated;image-rendering:crisp-edges}
+  #c.on{display:block}
+
+  /* ---------- names and banners, over the scene ---------- */
+  #ui{position:fixed;inset:0;pointer-events:none;z-index:2}
+  .nm{position:absolute;left:0;top:0;translate:-50% -100%;white-space:nowrap;max-width:40vw;overflow:hidden;text-overflow:ellipsis;
+    font:600 calc(var(--p) * 6)/1.1 'Pixelify Sans',monospace;color:var(--c,#fff);padding:0 calc(var(--p) * .6);
+    text-shadow:var(--ol);opacity:0;transition:opacity .3s}
+  .nm.on{opacity:1}
+  #ban{position:absolute;left:50%;top:0;translate:-50% -100%;text-align:center;white-space:nowrap}
+  #ban b{display:block;font:400 calc(var(--p) * 13)/1 'Rye',serif;color:#ffe9b0;letter-spacing:.02em;
+    text-shadow:var(--ol),0 calc(var(--p) * 1.2) 0 #1c120c}
+  #ban small{display:block;margin-top:calc(var(--p) * 1.4);font:600 calc(var(--p) * 6)/1.1 'Pixelify Sans',monospace;color:#bfeeff;text-shadow:var(--ol)}
+  #ban small:empty{display:none}
+  #ban .w{color:var(--wc,#ffe9b0)}
+  #ban{scale:0;opacity:0}
+  #ban.on{animation:pop .35s cubic-bezier(.3,1.7,.5,1) forwards}
+  #ban.off{scale:1;opacity:1;transition:opacity .25s,scale .25s;opacity:0;scale:.7}
+  @keyframes pop{0%{scale:0;opacity:1}100%{scale:1;opacity:1}}
+
+  #toast{position:fixed;left:50%;bottom:24px;translate:-50% 0;z-index:30;padding:9px 14px 7px;font:700 16px/1.3 var(--txt);
+    background:var(--paper);color:var(--ink);border:3px solid var(--ink);border-radius:10px;box-shadow:4px 4px 0 var(--ink);
+    opacity:0;transition:opacity .3s;pointer-events:none;max-width:80vw;text-align:center}
+  #toast.show{opacity:1}
+
+  /* ---------- host bar and the settings window (only visible while you interact with the source) ---------- */
+  .btn{font:18px/1 var(--head);letter-spacing:.05em;padding:9px 14px 7px;border:3px solid var(--ink);border-radius:10px;background:var(--paper);
+    color:var(--ink);box-shadow:3px 3px 0 var(--ink);cursor:pointer;transition:transform .06s}
+  .btn:hover{transform:translate(-1px,-2px)}
+  .btn:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--ink)}
+  .btn.go{background:var(--pink);color:#fff;-webkit-text-stroke:1px var(--ink);paint-order:stroke fill}
+  .btn.warn{background:var(--yellow)}
+  #host{position:fixed;right:84px;bottom:22px;z-index:1000;display:flex;gap:10px;align-items:center;opacity:0;pointer-events:none;transition:opacity .25s}
+  body.mouse #host,#host:focus-within{opacity:1;pointer-events:auto}
+  #host input{width:150px;font:700 16px var(--txt);padding:8px 10px;border:3px solid var(--ink);border-radius:10px;box-shadow:3px 3px 0 var(--ink);outline:0}
+  #host input:focus{border-color:var(--violet)}
+  #host span{font:22px/1 var(--head);color:#fff;-webkit-text-stroke:1px var(--ink);paint-order:stroke fill}
+  #gear{position:fixed;right:20px;bottom:20px;width:50px;height:50px;z-index:1000;border:3px solid var(--ink);border-radius:50%;
+    background:var(--sun);box-shadow:3px 3px 0 var(--ink);cursor:pointer;display:grid;place-items:center;opacity:0;pointer-events:none;
+    transition:opacity .25s,transform .2s}
+  body.mouse #gear{opacity:1;pointer-events:auto}
+  #gear:hover{transform:rotate(30deg)}
+  #gear svg{width:28px;height:28px}
+  #settings{position:fixed;inset:0;z-index:1001;display:none;align-items:center;justify-content:center;
+    background:rgba(18,10,38,.7);pointer-events:auto;font:700 15px/1.35 var(--txt);color:var(--ink)}
+  #settings.open{display:flex}
+  .sp{width:min(900px,92vw);max-height:90vh;display:flex;flex-direction:column;background:var(--paper);border:4px solid var(--ink);
+    border-radius:16px;box-shadow:8px 8px 0 var(--ink);overflow:hidden}
+  .sp-head{padding:16px 22px 12px;background:var(--dots),var(--pink);border-bottom:4px solid var(--ink)}
+  .sp-head h2{margin:0;font:32px/1 var(--head);letter-spacing:.04em;color:var(--sun);-webkit-text-stroke:1.5px var(--ink);paint-order:stroke fill;
+    text-shadow:3px 3px 0 var(--ink)}
+  .sp-head p{margin:8px 0 0;font-size:14px;color:#fff}
+  .sp-body{overflow:auto;padding:20px 24px;display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:20px;background:var(--dots),#f4f1ff}
+  .sp-sec{padding:12px 14px 14px;background:var(--paper);border:3px solid var(--ink);border-radius:12px;box-shadow:4px 4px 0 var(--ink)}
+  .sp-sec h3{margin:0 0 10px;font:22px/1 var(--head);letter-spacing:.04em;color:var(--violet)}
+  .sp-f{margin:0 0 12px}
+  .sp-f:last-child{margin-bottom:0}
+  .sp-f label{display:block;margin-bottom:4px}
+  .sp-f input[type=text],.sp-f input[type=password],.sp-f input[type=number],.sp-f select{width:100%;box-sizing:border-box;
+    font:700 15px var(--txt);padding:7px 9px;border:2px solid var(--ink);border-radius:8px;background:#fff;color:var(--ink)}
+  .sp-f input:focus,.sp-f select:focus{outline:3px solid var(--cyan);outline-offset:1px}
+  .sp-f input:disabled,.sp-f select:disabled{background:#e8e6ef;color:#6a6278}
+  .sp-f small{display:block;margin-top:5px;font-size:13px;color:#4a4560}
+  .sp-f small.url{color:#c2185b}
+  .sp-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .sp-row label{margin:0}
+  .sw{position:relative;width:46px;height:24px;flex:none}
+  .sw input{opacity:0;width:100%;height:100%;margin:0;position:absolute;cursor:pointer;z-index:1}
+  .sw i{position:absolute;inset:0;background:#d6d2e2;border:2px solid var(--ink);border-radius:20px}
+  .sw i::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;background:#fff;border:2px solid var(--ink);border-radius:50%;
+    box-sizing:border-box;transition:transform .12s ease-out}
+  .sw input:checked + i{background:var(--green)}
+  .sw input:checked + i::after{transform:translateX(22px)}
+  .sw input:disabled + i{opacity:.5}
+  .sp-foot{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:14px 22px;background:var(--yellow);border-top:4px solid var(--ink)}
+  .sp-foot .grow{flex:1}
+  .sp-msg{font-size:14px;color:#c2185b;min-height:1em}
+  .sp-link{width:100%;font:12px monospace;padding:6px;border:2px solid var(--ink);border-radius:6px;display:none;margin-top:4px}
+  @media (max-height:560px){
+    #settings{align-items:flex-start}
+    .sp{max-height:none;height:100vh;overflow:auto;display:block;border-radius:0}
+    .sp-head p{display:none}
+    .sp-body{overflow:visible}
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui"><div class="nm" id="nA"></div><div class="nm" id="nB"></div><div id="ban"><b id="banT"></b><small id="banS"></small></div></div>
+<div id="toast"></div>
+<script type="module">
+import * as THREE from 'three';
+
+// ---------------- settings (saved locally; URL parameters override) ----------------
+const Q = new URLSearchParams(location.search);
+const STORE_KEY = 'duel.settings.v1';
+let saved = {}, storageOK = true;
+try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {}; } catch (e) { storageOK = false; }
+const FIELDS = [
+  { sec: 'Chat' },
+  { k: 'channel', label: 'Twitch channel', type: 'text', def: '', ph: 'yourchannel', help: 'Read anonymously, no login needed.' },
+  { k: 'kick', label: 'Kick channel', type: 'text', def: '', ph: 'yourchannel', help: 'Read anonymously, no login needed.' },
+  { k: 'tiktok', label: 'TikTok bridge', type: 'text', def: '', ph: '1 = TikFinity, or ws://…', help: 'TikTok needs a local bridge app. "1" uses TikFinity on this PC.' },
+  { k: 'youtube', label: 'YouTube live', type: 'text', def: '', ph: 'video ID / link, or ws://…', help: 'A live video ID or link (needs the API key below), or a bridge address.' },
+  { k: 'ytkey', label: 'YouTube API key', type: 'password', def: '', help: 'YouTube Data API v3 key from Google Cloud Console.' },
+  { k: 'ytpoll', label: 'YouTube check every (s)', type: 'num', def: 6, min: 2, max: 60, step: 1, help: 'Lower = snappier, but uses the daily API quota faster.' },
+  { k: 'demo', label: 'Demo chat', type: 'bool', def: false, help: 'Fake chatters duel every few seconds, for trying it out.' },
+  { sec: 'Duels' },
+  { k: 'cmd', label: 'Duel command', type: 'text', def: '!duel', help: '"!duel somebody" duels them, if they chatted in the last 10 minutes. On its own, it picks one of those.' },
+  { k: 'cooldown', label: 'Cooldown (s)', type: 'num', def: 60, min: 0, max: 3600, step: 5, help: 'After a duel, how long until the next one can start. The broadcaster skips it.' },
+  { k: 'modskip', label: 'Mods skip the cooldown', type: 'bool', def: false },
+  { k: 'who', label: 'Who can start one', type: 'select', def: 'everyone', opts: [['everyone', 'Everyone'], ['vips', 'Mods and VIPs'], ['mods', 'Mods'], ['owner', 'Only the broadcaster']],
+    help: 'The broadcaster always can. VIPs are a Twitch and Kick thing.' },
+  { k: 'pronouns', label: 'Cowboys or cowgirls by pronouns', type: 'bool', def: true,
+    help: "Looks up Twitch chatters' pronouns (from the Chat Pronouns extension, pronouns.alejo.io): she/her gets a cowgirl, he/him a cowboy, anyone else either." },
+  { k: 'allow', label: 'These people can too', type: 'text', def: '', ph: 'friend1, friend2', help: 'Names that can start a duel whatever "Who can start one" says.' },
+  { sec: 'Look' },
+  { k: 'pixel', label: 'Pixel size', type: 'num', def: 0, min: 0, max: 16, step: 1, help: 'Screen pixels per art pixel: bigger is chunkier. 0 = automatic (7 at 1080p).' },
+  { k: 'names', label: "Show the duelers' names", type: 'bool', def: true },
+  { k: 'hold', label: 'Winner stays up for (s)', type: 'num', def: 4, min: 1, max: 30, step: 0.5 },
+  { k: 'volume', label: 'Sound effects volume', type: 'num', def: 50, min: 0, max: 100, step: 5, help: '0 = silent.' },
+];
+const FIELD = Object.fromEntries(FIELDS.filter(f => f.k).map(f => [f.k, f]));
+function coerce(f, v) {
+  if (f.type === 'bool') return v === true || v === 1 || /^(1|true|yes|on)$/i.test(String(v));
+  if (f.type === 'num') { const n = parseFloat(v); return isNaN(n) ? f.def : Math.min(f.max, Math.max(f.min, n)); }
+  if (f.type === 'select') return f.opts.some(o => o[0] === v) ? v : f.def;
+  return String(v ?? '').trim();
+}
+const fromURL = {};
+for (const f of Object.values(FIELD)) if (Q.has(f.k)) fromURL[f.k] = coerce(f, Q.get(f.k));
+const SET = {};
+for (const f of Object.values(FIELD)) SET[f.k] = f.k in fromURL ? fromURL[f.k] : f.k in saved ? coerce(f, saved[f.k]) : f.def;
+const CFG = {
+  ...SET,
+  channel: SET.channel.replace(/^.*twitch\.tv\//i, '').replace(/^#/, '').replace(/[/?#].*$/, '').toLowerCase(),
+  kick: SET.kick.replace(/^.*kick\.com\//i, '').replace(/[/?#].*$/, '').toLowerCase(),
+  tiktok: SET.tiktok === '1' ? 'ws://localhost:21213/' : SET.tiktok,
+  cmd: (SET.cmd || '!duel').toLowerCase().split(/\s+/)[0],
+};
+const ALLOW = new Set(CFG.allow.toLowerCase().split(/[\s,]+/).map(s => s.replace(/^@/, '')).filter(Boolean));
+
+// Preview background outside OBS so you can actually see it in a browser
+const bgq = Q.get('bg');
+if (bgq && bgq !== 'none') document.body.style.background = bgq;
+else if (!bgq && !window.obsstudio) document.body.style.background = '#1a0f33';
+
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+let toastT;
+function toast(text) {
+  const t = $('toast'); t.textContent = text; t.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+// ---------------- random numbers ----------------
+function hash(s) { let h = 2166136261; for (const ch of String(s)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+const hash3 = (a, b, c) => ((Math.imul(a | 0, 73856093) ^ Math.imul(b | 0, 19349663) ^ Math.imul(c | 0, 83492791)) >>> 0) % 1000003;
+function rngOf(seed) {
+  let a = seed >>> 0;
+  return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+let rnd = rngOf(Date.now());
+const pick = (a, r = rnd) => a[Math.floor(r() * a.length)];
+const range = (a, b, r = rnd) => a + (b - a) * r();
+function shuffle(a, r) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function noise2(x, y, seed) {
+  const h = (i, j) => (Math.imul(Math.imul(i, 374761393) ^ Math.imul(j, 668265263) ^ seed, 1274126177) >>> 16) / 65535;
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return lerp(lerp(h(xi, yi), h(xi + 1, yi), u), lerp(h(xi, yi + 1), h(xi + 1, yi + 1), u), v);
+}
+
+// ---------------- colors ----------------
+const _hsl = {}, adjCache = new Map();
+// lighten / saturate / turn a CSS color, in sRGB
+function adj(css, dl = 0, ds = 0, dh = 0) {
+  dl = Math.round(dl * 100) / 100;
+  const k = css + '|' + dl + '|' + ds + '|' + dh;
+  let v = adjCache.get(k);
+  if (v) return v;
+  const c = new THREE.Color(css); c.getHSL(_hsl, THREE.SRGBColorSpace);
+  c.setHSL((_hsl.h + dh + 1) % 1, clamp(_hsl.s + ds, 0, 1), clamp(_hsl.l + dl, 0, 1), THREE.SRGBColorSpace);
+  adjCache.set(k, v = '#' + c.getHexString(THREE.SRGBColorSpace));
+  return v;
+}
+// A chatter's color, kept bright enough to show up; chatters without one get a color of their own from their name.
+function shirtOf(name, color) {
+  const c = /^#?[0-9a-f]{6}$/i.test(color || '') ? new THREE.Color(color[0] === '#' ? color : '#' + color) : null;
+  if (c) {
+    c.getHSL(_hsl, THREE.SRGBColorSpace);
+    c.setHSL(_hsl.h, clamp(_hsl.s, .45, .9), clamp(_hsl.l, .42, .62), THREE.SRGBColorSpace);
+    return '#' + c.getHexString(THREE.SRGBColorSpace);
+  }
+  const h = hash(name.toLowerCase());
+  return cssOf(`hsl(${h % 360},${65 + (h >>> 9) % 25}%,${48 + (h >>> 14) % 10}%)`);
+}
+const cssOf = c => '#' + new THREE.Color(c).getHexString(THREE.SRGBColorSpace);
+
+// ---------------- voxels ----------------
+// Each face: its normal, its corners (counter-clockwise from outside) and its light. The sun is setting behind
+// the town, so the tops catch a warm glow, one side is warm and the other is in cool purple shade.
+const FACES = [
+  [[1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]], [.92, .8, .72]],
+  [[-1, 0, 0], [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]], [.66, .64, .82]],
+  [[0, 1, 0], [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]], [1.12, 1.05, .94]],
+  [[0, -1, 0], [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]], [.48, .46, .58]],
+  [[0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], [1, 1, 1]],
+  [[0, 0, -1], [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]], [.6, .58, .72]],
+];
+// Ambient occlusion: each corner of a face gets darker the more cubes crowd round it (the usual voxel trick),
+// so nooks under roofs, round window frames and behind posts shade themselves.
+const AO = [1, .85, .74, .64];
+for (const f of FACES) {
+  const n = f[0], [i, j] = n[0] ? [1, 2] : n[1] ? [0, 2] : [0, 1];
+  f[3] = f[1].map(k => {
+    const a = [0, 0, 0], b = [0, 0, 0];
+    a[i] = k[i] * 2 - 1; b[j] = k[j] * 2 - 1;
+    return [a, b, [a[0] + b[0], a[1] + b[1], a[2] + b[2]]];
+  });
+}
+const vkey = (x, y, z) => ((x + 512) * 1024 + (y + 512)) * 1024 + (z + 512);
+const colCache = new Map();
+const linear = css => { let c = colCache.get(css); if (!c) colCache.set(css, c = new THREE.Color(css)); return c; };
+let geos = [];
+// vox: [x, y, z, color] unit cubes; only the faces that aren't against another cube are kept
+function voxGeo(vox) {
+  const occ = new Set();
+  for (const v of vox) occ.add(vkey(v[0], v[1], v[2]));
+  const pos = [], col = [];
+  for (const [x, y, z, css] of vox) {
+    const c = linear(css);
+    for (const [n, q, t, off] of FACES) {
+      const nx = x + n[0], ny = y + n[1], nz = z + n[2];
+      if (occ.has(vkey(nx, ny, nz))) continue;
+      const ao = off.map(([a, b, d]) => {
+        const s1 = occ.has(vkey(nx + a[0], ny + a[1], nz + a[2])), s2 = occ.has(vkey(nx + b[0], ny + b[1], nz + b[2]));
+        return AO[s1 && s2 ? 3 : s1 + s2 + occ.has(vkey(nx + d[0], ny + d[1], nz + d[2]))];
+      });
+      for (const i of [0, 1, 2, 0, 2, 3]) {
+        pos.push(x + q[i][0], y + q[i][1], z + q[i][2]);
+        col.push(Math.min(1, c.r * t[0] * ao[i]), Math.min(1, c.g * t[1] * ao[i]), Math.min(1, c.b * t[2] * ao[i]));
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geos.push(geo);
+  return geo;
+}
+// a little voxel model being put together
+class VB {
+  constructor() { this.m = new Map(); }
+  set(x, y, z, c) { if (c) this.m.set(vkey(x, y, z), [x, y, z, c]); else this.m.delete(vkey(x, y, z)); }
+  get(x, y, z) { return this.m.get(vkey(x, y, z))?.[3]; }
+  box(x0, y0, z0, x1, y1, z1, c) {
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) this.set(x, y, z, typeof c === 'function' ? c(x, y, z) : c);
+  }
+  geo() { return voxGeo([...this.m.values()]); }
+}
+// A flat sprite is a map of "x,y" → { c: color, d: depth, z0: front-to-back start }, extruded into cubes, with
+// an optional dark outline round its silhouette (the outline has the depth of whatever it borders).
+const ck = (x, y) => x + ',' + y;
+function spriteGeo(cells, outline) {
+  if (outline) {
+    const add = new Map();
+    for (const [k, cell] of cells) {
+      const [x, y] = k.split(',').map(Number);
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nk = ck(x + dx, y + dy);
+        if (y + dy < 0 || cells.has(nk)) continue;
+        const o = add.get(nk);
+        if (!o || o.d < cell.d) add.set(nk, { c: outline, d: cell.d, z0: cell.z0 });
+      }
+    }
+    for (const [k, v] of add) cells.set(k, v);
+  }
+  const vox = [];
+  for (const [k, { c, d, z0 }] of cells) {
+    const [x, y] = k.split(',').map(Number), s = z0 ?? -(d >> 1);
+    for (let z = s; z < s + d; z++) vox.push([x, y, z, c]);
+  }
+  return voxGeo(vox);
+}
+
+// ---------------- surfaces ----------------
+// vertical boards: a dark seam between them, each board its own shade, the odd knot, a lit left edge
+function plankV(x, y, base, sd, pw = 4) {
+  const p = Math.floor(x / pw), lx = x - p * pw;
+  if (lx === 0) return adj(base, -.13);
+  let d = (hash3(p, sd, 1) % 9 - 4) * .012 + (lx === 1 ? .035 : 0);
+  if (hash3(x, y, sd) % 23 === 0) d -= .07;
+  return adj(base, d);
+}
+// clapboard siding: each board's lower lip in shadow
+function plankH(x, y, base, sd) {
+  const p = Math.floor(y / 2);
+  let d = (hash3(p, sd, 2) % 7 - 3) * .01 + (y - p * 2 === 0 ? -.09 : .02);
+  if (hash3(x, y, sd) % 29 === 0) d -= .05;
+  return adj(base, d);
+}
+function brick(x, y, base, mortar, sd) {
+  const course = Math.floor(y / 3), ly = y - course * 3;
+  if (ly === 2) return mortar;
+  const xo = x + (course % 2) * 3, b = Math.floor(xo / 6);
+  if (xo - b * 6 === 5) return mortar;
+  return adj(base, (hash3(b, course, sd) % 9 - 4) * .018 + (ly === 1 ? .02 : -.01));
+}
+function stone(x, y, base, mortar, sd) {
+  const course = Math.floor(y / 4), ly = y - course * 4;
+  if (ly === 3) return mortar;
+  const xo = x + hash3(course, sd, 3) % 5, b = Math.floor(xo / 7);
+  if (xo - b * 7 === 6) return mortar;
+  return adj(base, (hash3(b, course, sd) % 11 - 5) * .02 + (ly === 2 ? .04 : 0));
+}
+// the rows just under an overhang are in its shadow
+const underRoof = (y, ry) => y === ry - 1 ? -.16 : y === ry - 2 ? -.1 : y === ry - 3 ? -.05 : 0;
+// shingles on a roof, row by row
+const shingle = (base, z, x, sd) => adj(base, (z % 2 ? -.06 : .03) + (hash3(x >> 2, z, sd) % 4) * .01);
+
+const FONT = {
+  S: ['.111', '1...', '.11.', '...1', '111.'], A: ['.11.', '1..1', '1111', '1..1', '1..1'], L: ['1...', '1...', '1...', '1...', '1111'],
+  O: ['.11.', '1..1', '1..1', '1..1', '.11.'], N: ['1..1', '11.1', '1.11', '1..1', '1..1'], J: ['..11', '...1', '...1', '1..1', '.11.'],
+  I: ['111', '.1.', '.1.', '.1.', '111'], B: ['111.', '1..1', '111.', '1..1', '111.'], K: ['1..1', '1.1.', '11..', '1.1.', '1..1'],
+  H: ['1..1', '1..1', '1111', '1..1', '1..1'], T: ['111', '.1.', '.1.', '.1.', '.1.'], E: ['1111', '1...', '111.', '1...', '1111'],
+  G: ['.111', '1...', '1.11', '1..1', '.111'], R: ['111.', '1..1', '111.', '1.1.', '1..1'], $: ['.11.', '11..', '.11.', '..11', '.11.'],
+};
+const textWidth = s => [...s].reduce((w, ch) => w + FONT[ch][0].length + 1, -1);
+// letters 5 high with their bottom row at y, centred on cx, with a soft shadow down and to the right
+function drawText(b, s, cx, y, z, c, shadow) {
+  let x = cx - Math.floor(textWidth(s) / 2);
+  for (const ch of s) {
+    const g = FONT[ch];
+    g.forEach((row, j) => [...row].forEach((bit, i) => {
+      if (bit !== '1') return;
+      if (shadow && b.get(x + i + 1, y + 3 - j, z)) b.set(x + i + 1, y + 3 - j, z, shadow);
+    }));
+    g.forEach((row, j) => [...row].forEach((bit, i) => { if (bit === '1') b.set(x + i, y + 4 - j, z, c); }));
+    x += g[0].length + 1;
+  }
+}
+// a lit window: frame, warm glass set back into the wall, cross bars, curtains, a sill
+function lit(b, x0, y0, w, h, o = {}) {
+  const fr = o.frame || '#4a2c16', mx = x0 + (w >> 1) - 1, my = y0 + (h >> 1);
+  for (let x = x0; x < x0 + w; x++) for (let y = y0; y < y0 + h; y++) {
+    const top = y0 + h - 1;
+    if (o.arch && y >= top - 1 && (x === x0 || x === x0 + w - 1)) continue;
+    if (o.arch && y === top && (x === x0 + 1 || x === x0 + w - 2)) continue;
+    const edge = x === x0 || x === x0 + w - 1 || y === y0 || y === top || (o.arch && y === top - 1 && (x === x0 + 1 || x === x0 + w - 2));
+    if (edge) { b.set(x, y, 1, fr); continue; }
+    b.set(x, y, 1, null);
+    let c = y > top - 3 ? '#e09a3a' : y > my ? '#ffd27a' : '#f4b04a';
+    if (o.curtain && (x === x0 + 1 || x === x0 + w - 2 || y === top - 1)) c = o.curtain;
+    if (!o.nobars && (x === mx || x === mx + 1 || y === my)) c = fr;
+    b.set(x, y, 0, c);
+  }
+  if (!o.nosill) b.box(x0 - 1, y0 - 1, 1, x0 + w, y0 - 1, 2, o.sill || '#6e4626');
+}
+// the roof and side walls behind a facade, so it has some body when you see it from above
+function roofBox(b, x0, x1, top, depth, sh, wall, sd) {
+  for (let z = -2; z >= -depth; z--) {
+    for (let x = x0; x <= x1; x++) b.set(x, top, z, shingle(sh, z, x, sd));
+    for (let y = 2; y < top; y++) { b.set(x0, y, z, adj(wall, -.1)); b.set(x1, y, z, adj(wall, -.1)); }
+  }
+}
+
+// ---------------- the buildings (each centred on x = 0, its front at z = 1) ----------------
+function saloonB(r) {
+  const b = new VB(), sd = Math.floor(r() * 1e6), wood = '#a8703e';
+  b.box(-35, 0, -1, 34, 1, 6, (x, y, z) => z === 6 ? '#5e3a20' : y === 0 ? '#4e2e18' : adj('#8a5a30', (z % 2 ? -.05 : .02) + hash3(x >> 3, z, sd) % 5 * .01));
+  b.box(-32, 2, -1, 31, 32, 1, (x, y) => adj(plankV(x, y, wood, sd), y <= 3 ? -.07 : underRoof(y, 28)));
+  b.box(-26, 33, -1, 25, 45, 1, (x, y) => plankV(x, y, wood, sd));
+  b.box(-26, 46, -1, 25, 46, 1, '#6e4626');
+  b.box(-27, 47, -1, 26, 47, 2, '#5a361c');
+  for (const x of [-32, 31]) b.box(x, 2, 2, x, 27, 2, '#c08a50');
+  b.box(-21, 35, 2, 20, 44, 2, (x, y) => x === -21 || x === 20 || y === 35 || y === 44 ? '#5a361c' : y === 43 ? '#f6ecd0' : y === 36 ? '#d8c89a' : '#eadcb0');
+  drawText(b, 'SALOON', 0, 38, 2, '#a8321e', '#c8b080');
+  for (const wx of [-28, 16]) lit(b, wx, 9, 12, 12, { curtain: '#b8323a' });
+  for (const lx of [-11, 9]) { b.box(lx, 21, 2, lx + 1, 21, 2, '#3a2416'); b.box(lx, 18, 2, lx + 1, 20, 2, x => x === lx ? '#ffe08a' : '#ffc850'); b.box(lx, 17, 2, lx + 1, 17, 2, '#3a2416'); }
+  // the doorway (a hole the cowboys walk out of) and its frame
+  for (let x = -7; x <= 6; x++) for (let y = 2; y <= 25; y++) for (let z = -1; z <= 1; z++) b.set(x, y, z, null);
+  b.box(-8, 2, -1, -8, 26, 2, '#5a361c'); b.box(7, 2, -1, 7, 26, 2, '#5a361c'); b.box(-8, 26, -1, 7, 26, 2, '#5a361c');
+  // the porch roof, a railing along the top of it, and its posts
+  b.box(-36, 28, -1, 35, 30, 9, (x, y, z) => y === 30 ? shingle('#8a5634', z, x, sd) : y === 28 ? '#4a2a16' : z === 9 ? '#6e4222' : '#7a4a28');
+  b.box(-36, 33, 8, 35, 33, 9, '#9a6a3a');
+  for (let x = -36; x <= 35; x += 2) b.box(x, 31, 9, x, 32, 9, '#8a5a30');
+  for (const px of [-34, -20, 18, 32]) b.box(px, 2, 7, px + 1, 27, 8, x => x === px ? '#9a6838' : '#7a4c2a');
+  // a barrel and a crate
+  for (let x = -32; x <= -26; x++) for (let z = 2; z <= 5; z++) for (let y = 2; y <= 8; y++) {
+    if ((x + 29) ** 2 / 9 + (z - 3.5) ** 2 / 3.2 > 1) continue;
+    b.set(x, y, z, y === 8 ? '#5a3418' : y === 3 || y === 7 ? '#5a5f6a' : adj('#94602e', (x + 29) * .02));
+  }
+  b.box(25, 2, 2, 30, 7, 5, (x, y) => x === 25 || x === 30 || y === 2 || y === 7 ? '#6e4626' : x - 25 === y - 2 || x - 25 === 7 - y ? '#7a5230' : '#b08a52');
+  roofBox(b, -32, 31, 32, 14, '#5e3e2c', wood, sd);
+  return b;
+}
+function jailB(r) {
+  const b = new VB(), sd = Math.floor(r() * 1e6), st = '#9a9284', mo = '#c4bcac';
+  b.box(-20, 0, -1, 19, 32, 1, (x, y) => y <= 1 ? adj(stone(x, y, '#7a7468', mo, sd), -.05) : stone(x, y, st, mo, sd));
+  b.box(-21, 33, -1, 20, 33, 2, '#b0a898');
+  for (let x = -21; x <= 20; x++) if (((x + 21) >> 2) % 2 === 0) b.box(x, 34, -1, x, 35, 1, stone(x, 35, st, mo, sd));
+  b.box(-12, 24, 2, 11, 31, 2, (x, y) => x === -12 || x === 11 || y === 24 || y === 31 ? '#2a1a0e' : '#4a2c16');
+  drawText(b, 'JAIL', 0, 26, 2, '#f0e0b0', '#2a1a0e');
+  // a heavy door with iron bands and a sheriff's star
+  for (let x = -4; x <= 3; x++) for (let y = 2; y <= 19; y++) {
+    b.set(x, y, 1, null);
+    b.set(x, y, 0, y === 6 || y === 15 ? (x % 2 ? '#8a8a92' : '#4a4a52') : x === -4 || x === 3 ? '#4a2e1a' : adj('#6a4426', (x & 1) * .03));
+  }
+  b.box(-1, 10, 1, 0, 12, 1, '#f0c840'); b.set(-2, 11, 1, '#f0c840'); b.set(1, 11, 1, '#f0c840');
+  b.box(-6, 20, -1, 5, 21, 2, '#b8b0a0');
+  // barred windows, and somebody peeking out of one
+  for (const wx of [-17, 8]) {
+    b.box(wx - 1, 9, 1, wx + 8, 9, 2, '#b8b0a0');
+    for (let x = wx; x < wx + 8; x++) for (let y = 10; y <= 17; y++) { b.set(x, y, 1, (x - wx) % 2 ? '#c0c0c8' : null); b.set(x, y, 0, '#1e1a24'); }
+  }
+  b.set(-14, 14, 0, '#ffffff'); b.set(-12, 14, 0, '#ffffff');
+  // a wanted poster
+  b.box(10, 2, 2, 14, 7, 2, (x, y) => y === 7 ? '#8a2a1a' : '#efe0b8');
+  b.set(11, 5, 2, '#5a3a2a'); b.set(13, 5, 2, '#5a3a2a'); b.box(11, 3, 2, 13, 3, 2, '#5a3a2a');
+  roofBox(b, -20, 19, 32, 12, '#6a6258', st, sd);
+  return b;
+}
+function bankB(r) {
+  const b = new VB(), sd = Math.floor(r() * 1e6), br = '#a44a32', mo = '#d8c8b0', sn = '#d0c6b0';
+  b.box(-22, 0, -1, 21, 35, 1, (x, y) => y <= 2 ? adj(stone(x, y, '#b8ae9c', mo, sd), -.04) : brick(x, y, br, mo, sd));
+  for (const px of [-22, -9, 8, 20]) { b.box(px, 3, 2, px + 1, 33, 2, x => adj(sn, x === px ? .04 : -.04)); b.box(px - 1, 3, 2, px + 2, 3, 3, sn); }
+  b.box(-23, 35, -1, 22, 36, 3, (x, y) => y === 36 ? adj(sn, .05) : sn);
+  for (let x = -22; x <= 21; x += 2) b.set(x, 34, 2, sn);
+  for (let k = 0; k < 8; k++) b.box(-18 + k * 2, 37 + k, -1, 17 - k * 2, 37 + k, 1, x => x <= -18 + k * 2 + 1 || x >= 17 - k * 2 - 1 ? adj(sn, -.06) : sn);
+  drawText(b, '$', 0, 38, 2, '#f0c840');
+  b.box(-12, 25, 2, 11, 33, 2, (x, y) => x === -12 || x === 11 || y === 25 || y === 33 ? '#f0c840' : '#2f5a3a');
+  drawText(b, 'BANK', 0, 27, 2, '#f0c840');
+  // double doors with a lit fanlight
+  for (let x = -5; x <= 4; x++) for (let y = 3; y <= 22; y++) {
+    b.set(x, y, 1, null);
+    b.set(x, y, 0, y >= 20 ? (x === -5 || x === 4 || y === 22 ? '#2a4a34' : '#ffd27a') : x === -5 || x === 4 || x === -1 || x === 0 ? '#2a4a34' : (y % 6 === 0 ? '#2a4a34' : '#3a6a48'));
+  }
+  b.set(-2, 11, 1, '#f0c840'); b.set(1, 11, 1, '#f0c840');
+  for (const wx of [-19, 12]) lit(b, wx, 8, 7, 17, { arch: true, frame: '#2a4a34', sill: sn, curtain: '#3a6a48' });
+  roofBox(b, -22, 21, 35, 12, '#5a4a44', br, sd);
+  return b;
+}
+function hotelB(r) {
+  const b = new VB(), sd = Math.floor(r() * 1e6), paint = pick(['#5f9a8a', '#d8c8a0', '#c87a6a', '#7a8ac0'], r), trim = '#f0e8d8';
+  const shut = pick(['#2f5a3a', '#7a2a2a', '#2a3a6a'], r);
+  b.box(-26, 0, -1, 25, 46, 1, (x, y) => y <= 1 ? '#6a5a4a' : adj(plankH(x, y, paint, sd), underRoof(y, 23)));
+  for (const x of [-26, 25]) b.box(x, 2, 2, x, 46, 2, trim);
+  b.box(-27, 47, -1, 26, 48, 3, (x, y) => y === 48 ? trim : adj(trim, -.08));
+  b.box(-15, 49, 0, 14, 57, 1, (x, y) => x === -15 || x === 14 || y === 49 || y === 57 ? '#6e4626' : '#f2e6c4');
+  drawText(b, 'HOTEL', 0, 51, 1, '#2f4a7a', '#c8bc9a');
+  for (let x = -4; x <= 3; x++) for (let y = 2; y <= 17; y++) {
+    b.set(x, y, 1, null);
+    b.set(x, y, 0, x === -4 || x === 3 || x === -1 || x === 0 || y === 17 ? '#5a3418' : y >= 11 ? '#ffd27a' : '#7a4a26');
+  }
+  b.box(-5, 2, 2, -5, 18, 2, trim); b.box(4, 2, 2, 4, 18, 2, trim); b.box(-5, 18, 2, 4, 18, 2, trim);
+  for (const wx of [-21, 12]) lit(b, wx, 5, 9, 10, { frame: '#4a3a2a', curtain: '#e8e0d0', sill: trim });
+  // the balcony
+  b.box(-26, 23, 2, 25, 23, 7, (x, y, z) => z === 7 ? adj('#8a6a4a', -.08) : '#8a6a4a');
+  b.box(-26, 27, 7, 25, 27, 7, trim);
+  for (let x = -26; x <= 25; x += 2) b.box(x, 24, 7, x, 26, 7, trim);
+  for (const px of [-26, 24]) b.box(px, 2, 6, px + 1, 22, 7, trim);
+  // upstairs windows with shutters and flower boxes
+  for (const wx of [-21, -4, 13]) {
+    lit(b, wx, 30, 8, 10, { frame: '#4a3a2a', curtain: '#e8e0d0', nosill: true });
+    for (const sx of [wx - 2, wx + 8]) b.box(sx, 30, 2, sx + 1, 39, 2, (x, y) => y % 2 ? shut : adj(shut, -.08));
+    b.box(wx - 1, 29, 2, wx + 8, 29, 3, '#7a4a26');
+    for (let x = wx - 1; x <= wx + 8; x++) b.set(x, 30, 3, hash3(x, wx, sd) % 3 ? pick(['#ff6a9a', '#ffd84a', '#ff8a3a', '#e84a6a'], r) : '#4a9a40');
+  }
+  roofBox(b, -26, 25, 46, 12, '#4a3e46', paint, sd);
+  return b;
+}
+function storeB(r) {
+  const b = new VB(), sd = Math.floor(r() * 1e6), paint = '#c8983c';
+  b.box(-25, 0, -1, 24, 40, 1, (x, y) => y <= 1 ? '#5a3a20' : adj(plankV(x, y, paint, sd, 5), y <= 3 ? -.06 : underRoof(y, 21)));
+  for (const x of [-25, 24]) b.box(x, 2, 2, x, 40, 2, '#f2e6c4');
+  b.box(-26, 41, -1, 25, 41, 2, '#7a4a26');
+  b.box(-19, 27, 2, 18, 40, 2, (x, y) => x === -19 || x === 18 || y === 27 || y === 40 ? '#9a2a1a' : '#f2e6c4');
+  drawText(b, 'GENERAL', 0, 34, 2, '#2f5a3a', '#cfc2a0');
+  drawText(b, 'STORE', 0, 28, 2, '#2f5a3a', '#cfc2a0');
+  // a striped awning
+  for (let k = 0; k <= 5; k++) b.box(-25, 26 - k, 2 + k, 24, 26 - k, 2 + k, x => Math.floor((x + 25) / 3) % 2 ? '#c83a32' : '#f2e6c4');
+  for (let x = -25; x <= 24; x++) if ((x + 25) % 3 === 1) b.set(x, 20, 7, Math.floor((x + 25) / 3) % 2 ? '#c83a32' : '#f2e6c4');
+  // shop windows full of goods
+  for (const wx of [-22, 7]) for (let x = wx; x < wx + 15; x++) for (let y = 4; y <= 18; y++) {
+    const edge = x === wx || x === wx + 14 || y === 4 || y === 18;
+    if (edge) { b.set(x, y, 1, '#5a361c'); continue; }
+    b.set(x, y, 1, null);
+    const shelf = y === 8 || y === 13, goods = (y === 9 || y === 10 || y === 14 || y === 15) && hash3(x, y >> 2, sd) % 3;
+    b.set(x, y, 0, shelf ? '#7a4a26' : goods ? pick(['#c83a32', '#3a7ac8', '#f0c840', '#5aaa4a', '#f2e6c4', '#8a5aa8'], r) : '#f6d48a');
+  }
+  for (let x = -4; x <= 3; x++) for (let y = 2; y <= 19; y++) {
+    b.set(x, y, 1, null);
+    b.set(x, y, 0, x === -4 || x === 3 || y === 19 || y === 11 ? '#4a2a14' : y > 11 ? '#ffd27a' : '#6a3a1e');
+  }
+  // sacks and a crate of apples out front
+  for (const [sx, h] of [[-24, 5], [-21, 4]]) for (let x = sx; x <= sx + 2; x++) for (let z = 2; z <= 4; z++) for (let y = 2; y <= 2 + h; y++) {
+    if ((x === sx || x === sx + 2) && (z === 2 || z === 4)) continue;
+    b.set(x, y, z, y === 2 + h ? '#8a6a3a' : adj('#c8b088', (x - sx - 1) * -.03));
+  }
+  b.box(17, 2, 2, 22, 5, 5, (x, y) => y === 5 ? (hash3(x, y, sd) % 4 ? '#d83a2a' : '#4aa83a') : x === 17 || x === 22 ? '#7a5230' : '#a07a48');
+  roofBox(b, -25, 24, 30, 12, '#5e3e2c', paint, sd);
+  return b;
+}
+const BUILDINGS = { jail: [jailB, 21], bank: [bankB, 23], hotel: [hotelB, 27], store: [storeB, 26] };
+
+// the dark room behind the saloon's door (a floor, a bar, bottles, a lamp) and its batwing doors
+function saloonInside(r) {
+  const b = new VB();
+  b.box(-7, -1, -13, 6, -1, -2, (x, y, z) => z % 2 ? '#3a2214' : '#4a2a16');
+  b.box(-7, 0, -14, 6, 26, -14, (x, y) => y <= 7 ? '#3e2414' : y === 8 ? '#6a3a1e' : y === 15 ? '#4a2a16' : '#24130a');
+  b.box(-6, 0, -12, 5, 7, -10, (x, y) => y === 7 ? '#7a4a26' : '#4a2a16');
+  for (let x = -6; x < 6; x += 2) b.box(x, 16, -14, x, 17, -14, pick(['#3a6a3a', '#7a3a2a', '#c8a040', '#4a5a8a'], r));
+  b.box(-1, 22, -14, 0, 23, -14, '#ffc850');
+  return b;
+}
+function batwing(side) {
+  const b = new VB();
+  for (let i = 0; i < 7; i++) for (let y = 9; y <= 19; y++) {
+    if ((y === 19 && i > 3) || (y === 18 && i > 5)) continue;
+    const x = side < 0 ? i : -1 - i, edge = i === 0 || i === 6 || y === 9 || y === 19 || (y === 18 && i === 5);
+    b.set(x, y, 0, edge ? '#6e4626' : y % 2 ? '#c89050' : '#a87038');
+  }
+  return b;
+}
+
+// ---------------- horses ----------------
+const COATS = [['#8a5a34', '#3a2418'], ['#a8582a', '#5a2a14'], ['#4a3a34', '#1e1814'], ['#e8e0d0', '#9a9488'], ['#d8b060', '#f4ecd0'], ['#9a9a9a', '#4a4a4a']];
+function horseParts(r) {
+  const [coat, mane] = pick(COATS, r), socks = r() < .5, blaze = r() < .5, paint = r() < .25, blanket = pick(['#c83a32', '#2b6fd6', '#2e9b56', '#e8c53a'], r);
+  const muzzle = adj(coat, coat === '#4a3a34' ? .1 : -.08);
+  const body = new VB(), head = new VB(), tail = new VB();
+  for (let x = -2; x <= 2; x++) for (let y = 8; y <= 13; y++) for (let z = -6; z <= 5; z++) {
+    if ((x === -2 || x === 2) + (y === 8 || y === 13) + (z === -6 || z === 5) >= 2) continue;
+    body.set(x, y, z, paint && hash3(x >> 1, y >> 1, z >> 1) % 3 === 0 ? '#f4ecd8' : y === 8 ? adj(coat, -.06) : coat);
+  }
+  for (const [x0, z0] of [[-2, -6], [1, -6], [-2, 4], [1, 4]])
+    body.box(x0, 0, z0, x0 + 1, 7, z0 + 1, (x, y) => y === 0 ? '#3a2a20' : socks && y <= 2 ? '#f4ecd8' : coat);
+  body.box(-2, 14, -2, 2, 14, 1, '#6a3a1e'); body.set(0, 15, 1, '#6a3a1e'); body.box(-1, 15, -2, 1, 15, -2, '#6a3a1e');
+  for (const x of [-3, 3]) { body.box(x, 10, -3, x, 13, 2, blanket); body.box(x, 7, 0, x, 8, 0, '#3a2a20'); }
+  // a hitching post in front of it, and the reins tied to it
+  body.box(-1, 0, 14, 0, 9, 15, (x, y) => y === 9 ? '#5a361c' : x === -1 ? '#8a5a30' : '#7a4a26');
+  for (const [y, z] of [[15, 12], [14, 13], [13, 13], [12, 14], [11, 14], [10, 14]]) body.set(0, y, z, '#3a2214');
+  // neck and head (they bob), mane, ears, eyes
+  head.box(-1, 0, 0, 1, 6, 2, coat);
+  head.box(-1, 4, 2, 1, 7, 7, (x, y, z) => z >= 6 && y <= 5 ? muzzle : coat);
+  head.set(-1, 5, 7, '#2a1a14'); head.set(1, 5, 7, '#2a1a14');
+  head.set(-1, 6, 4, '#1a1010'); head.set(1, 6, 4, '#1a1010');
+  head.set(-1, 8, 3, coat); head.set(1, 8, 3, coat);
+  head.box(0, 1, -1, 0, 7, -1, mane); head.set(0, 8, 4, mane);
+  if (blaze) { head.set(0, 6, 7, '#f4ecd8'); head.set(0, 7, 7, '#f4ecd8'); head.set(0, 7, 6, '#f4ecd8'); }
+  tail.box(0, -6, -1, 0, 0, 0, mane); tail.set(0, -7, -1, mane);
+  return { body, head, tail };
+}
+let horses = [];
+function makeHorse(x, z, yaw, r, delay) {
+  const h = horseParts(r), m = model(x, z);
+  const part = (vb, parent) => { const o = new THREE.Mesh(vb.geo(), MAT); parent.add(o); return outlined(o); };
+  part(h.body, m.inner);
+  const head = new THREE.Group(); head.position.set(0, 12, 5); m.inner.add(head); part(h.head, head);
+  const tail = new THREE.Group(); tail.position.set(0, 12, -7); m.inner.add(tail); part(h.tail, tail);
+  m.pivot.rotation.y = yaw;
+  prop(m.pivot, { delay, dur: .55, twist: 1.2 });
+  horses.push({ head, tail, ph: r() * 10 });
+}
+
+// ---------------- the duelists ----------------
+const HATS = [['#f1e8d4', '#8a6a4a'], ['#2b2422', '#a8322a'], ['#8a5a32', '#3a2416'], ['#c49a5e', '#6e4626'], ['#5a5f6a', '#2b2422'], ['#e8a0b8', '#ffffff'], ['#7a4a8a', '#f0c840']];
+const HAIR = ['#3b2414', '#6b3a1e', '#1e1a18', '#e0b25a', '#8c8c8c', '#b8502a', '#f0d890'];
+const SKIN = [['#fbd9bb', '#e8b898'], ['#f0c09a', '#d8a07a'], ['#d29a6a', '#b47a4e'], ['#9a6440', '#7e4e30'], ['#6a4228', '#52321e']];
+const SCARF = ['#d23a3a', '#2b6fd6', '#e8c53a', '#2e9b56', '#e86fb0', '#f08a2a'];
+const VEST = ['#5a3a22', '#3a2a1e', '#7a5230', '#4a4a52', '#6a2a2a'];
+const PANTS = ['#3d5a8a', '#4a4a5a', '#6a5a42', '#2e4a6e'];
+const GUNS = ['#ff7a1a', '#3ad16a', '#ff4fb0', '#8a5cff', '#ffd21a', '#2fb8ff'];
+const STYLES = { girl: ['long', 'braids', 'ponytail'], boy: ['short', 'short', 'shaggy'], any: ['short', 'shaggy', 'long', 'braids', 'ponytail'] };
+
+// The same chatter always gets the same look (as a cowgirl, a cowboy, or either); the shirt is their chat color.
+function cowboyLook(who, style, gunNot) {
+  const r = rngOf(hash('cowboy:' + who.name.toLowerCase()));
+  const [H, h] = pick(HATS, r), R = pick(HAIR, r), [S, s] = pick(SKIN, r), C = shirtOf(who.name, who.color);
+  let G = pick(GUNS, r);
+  if (G === gunNot) G = GUNS[(GUNS.indexOf(G) + 1) % GUNS.length];
+  const hair = pick(STYLES[style] || STYLES.any, r), extra = r();
+  return {
+    hair, lashes: style === 'girl' || (style !== 'boy' && extra < .5), tache: style === 'boy' && extra < .35, flower: style === 'girl' ? extra < .7 : style !== 'boy' && extra < .3,
+    pal: { R, S, s, E: '#2a1a2a', K: '#ff8fa0', M: '#c0605a', W: pick(SCARF, r), C, c: adj(C, -.12), V: pick(VEST, r), L: '#3a2416', Y: '#f0c040',
+      O: '#5a3418', P: pick(PANTS, r), B: '#5a3418', B2: '#7a4a26', G, g: '#9fe6ff', n: '#ffe14a', H, h, rib: pick(['#ff6a9a', '#ffd84a', '#6ac8ff'], r), fl: pick(['#ff6a9a', '#ffd84a', '#ff8a3a'], r) },
+  };
+}
+// everything but the skin goes darker and a little bluer when it's wet
+function wetPal(p) {
+  const o = { ...p };
+  for (const k of ['R', 'W', 'C', 'c', 'V', 'L', 'O', 'P', 'B', 'B2', 'H', 'h']) o[k] = adj(p[k], -.13, .05, .01);
+  return o;
+}
+// A chibi: big round head, little body. Model space: feet at y = 0, facing +z.
+function headVB(L, P, face) {
+  const b = new VB();
+  for (let x = -4; x <= 3; x++) for (let y = 10; y <= 17; y++) for (let z = -3; z <= 3; z++) {
+    if ((x === -4 || x === 3) + (y === 10 || y === 17) + (z === -3 || z === 3) >= 2) continue;
+    let c = y === 10 ? P.s : P.S;
+    if (y >= 16 || (z === -3 && y >= 11) || ((x === -4 || x === 3) && y >= 13 && z <= 1)) c = P.R;
+    b.set(x, y, z, c);
+  }
+  for (const x of [-3, -1, 0, 2]) b.set(x, 15, 3, P.R);
+  b.set(-5, 12, 0, P.S); b.set(4, 12, 0, P.S);
+  if (L.hair === 'long') { b.box(-3, 7, -4, 2, 15, -4, P.R); for (const x of [-5, 4]) b.box(x, 10, -3, x, 14, -1, P.R); }
+  if (L.hair === 'braids') for (const x of [-5, 4]) b.box(x, 6, -3, x, 14, -2, (xx, y) => y === 6 ? P.rib : P.R);
+  if (L.hair === 'ponytail') b.box(-1, 8, -5, 0, 15, -4, (x, y) => y === 14 ? P.rib : P.R);
+  if (L.hair === 'shaggy') b.box(-3, 11, -4, 2, 15, -4, P.R);
+  // the face: big shiny eyes, rosy cheeks, a little mouth
+  const f = (x, y, c) => b.set(x, y, 3, c);
+  for (const x0 of [-3, 1]) {
+    if (face === 'normal') { f(x0, 13, '#ffffff'); f(x0 + 1, 13, P.E); f(x0, 12, P.E); f(x0 + 1, 12, P.E); }
+    if (face === 'happy') { f(x0, 13, P.E); f(x0 + 1, 13, P.E); }
+    if (face === 'soaked') { f(x0, 12, P.E); f(x0 + 1, 12, P.E); }
+  }
+  if (L.lashes) { f(-3, 14, P.E); f(2, 14, P.E); }
+  f(-3, 11, P.K); f(2, 11, P.K);
+  const mouth = face === 'soaked' ? '#5a2a2a' : face === 'happy' ? '#9a3a3a' : P.M;
+  f(-1, 11, mouth); f(0, 11, mouth);
+  if (L.tache && face !== 'soaked') for (let x = -2; x <= 1; x++) f(x, 11, adj(P.R, -.08));
+  return b;
+}
+function hatVB(L, P) {
+  const b = new VB();
+  for (let x = -6; x <= 5; x++) for (let z = -4; z <= 3; z++) {
+    if (((x + .5) / 5.6) ** 2 + ((z + .5) / 4.2) ** 2 > 1) continue;
+    b.set(x, 0, z, P.H);
+    if (Math.abs(x + .5) > 4) b.set(x, 1, z, P.H);
+  }
+  for (let x = -3; x <= 2; x++) for (let z = -2; z <= 1; z++) for (let y = 1; y <= 3; y++) {
+    if (Math.abs(x + .5) === 2.5 && (z === -2 || z === 1) && y === 3) continue;
+    b.set(x, y, z, y === 1 ? P.h : P.H);
+  }
+  if (L.flower) { b.set(1, 2, 2, '#fff4a0'); for (const [x, y] of [[0, 2], [2, 2], [1, 1], [1, 3]]) b.set(x, y, 2, P.fl); }
+  return b;
+}
+function torsoVB(P) {
+  const b = new VB();
+  b.box(-3, 5, -2, 2, 9, 1, (x, y, z) => {
+    if (y === 5) return z === 1 && (x === -1 || x === 0) ? P.Y : P.L;
+    if (y === 9 && x >= -2 && x <= 1) return P.W;
+    const edge = x === -3 || x === 2;
+    return z === 1 ? (edge ? P.V : P.C) : edge || z === -2 ? P.V : P.C;
+  });
+  b.box(-1, 8, 2, 0, 8, 2, P.W);
+  return b;
+}
+function legVB(P) { const b = new VB(); b.box(-1, -5, -1, 0, -1, 0, (x, y) => y <= -4 ? P.B : y === -3 ? P.B2 : P.P); b.box(-1, -5, 1, 0, -5, 1, P.B); return b; }
+function armVB(P) { const b = new VB(); b.box(-1, -5, -1, 0, -1, 0, (x, y) => y === -5 ? P.S : y === -4 ? P.c : P.C); return b; }
+// the water pistol, held pointing along the arm (so it points wherever the arm does)
+function gunVB(P) { const b = new VB(); b.box(-1, -8, -1, 0, -6, 0, P.G); b.box(-1, -7, 1, 0, -6, 1, P.g); b.box(-1, -9, -1, 0, -9, 0, P.n); return b; }
+function holsterVB(P, xs, grip) { const b = new VB(); b.box(xs, 2, -1, xs, 3, 0, P.O); if (grip) b.box(xs, 4, -1, xs, 4, 0, P.G); return b; }
+
+const YAW = 50 * Math.PI / 180;   // three-quarter view: the body turned sideways, the head turned back to you
+// A dark outline round a part, so the little people stand out from the busy buildings: a copy of the part a
+// pixel bigger all round, drawn inside out (only its far side shows, peeking out round the edges).
+const OUTLINE_MAT = new THREE.MeshBasicMaterial({ color: 0x1c120c, side: THREE.BackSide });
+const _bb = new THREE.Box3(), _sz = new THREE.Vector3(), _ct = new THREE.Vector3();
+function outlined(mesh, pad = 1) {
+  mesh.geometry.computeBoundingBox();
+  _bb.copy(mesh.geometry.boundingBox); _bb.getSize(_sz); _bb.getCenter(_ct);
+  const hull = new THREE.Mesh(mesh.geometry, OUTLINE_MAT);
+  for (const a of ['x', 'y', 'z']) { const k = (_sz[a] + pad * 2) / Math.max(_sz[a], 1e-3); hull.scale[a] = k; hull.position[a] = mesh.position[a] + _ct[a] * (1 - k); }
+  mesh.parent.add(hull);
+  mesh.hull = hull;
+  return mesh;
+}
+// swap a part's shape or colors, keeping its outline with it
+const setGeo = (mesh, geo) => { mesh.geometry = geo; if (mesh.hull) mesh.hull.geometry = geo; };
+const yawOf = f => f > 0 ? YAW : f < 0 ? -YAW : 0;
+function makeCowboy(who, style, x, z, gunNot) {
+  const look = cowboyLook(who, style, gunNot), dry = look.pal, wet = wetPal(dry);
+  const both = fn => [fn(dry).geo(), fn(wet).geo()];
+  const g = {
+    head: { normal: headVB(look, dry, 'normal').geo(), happy: headVB(look, dry, 'happy').geo(), soaked: headVB(look, wet, 'soaked').geo() },
+    torso: both(torsoVB), leg: both(legVB), arm: both(armVB), hat: both(P => hatVB(look, P)), gun: both(gunVB),
+  };
+  const m = model(x, z);
+  const mesh = (geo, parent, px = 0, py = 0, pz = 0) => { const o = new THREE.Mesh(geo, MAT); o.position.set(px, py, pz); parent.add(o); return outlined(o); };
+  const limb = (geo, px, py) => { const grp = new THREE.Group(); grp.position.set(px, py, 0); m.inner.add(grp); grp.part = mesh(geo, grp); return grp; };
+  const headG = new THREE.Group(); m.inner.add(headG);
+  const cb = {
+    ...m, who, look, g, wetNow: 0, fx: x, fz: z, facing: 0, walking: false, walked: 0, lastStep: 0, pose: 'stand', jitter: 0, headG,
+    torso: mesh(g.torso[0], m.inner), head: mesh(g.head.normal, headG),
+    legL: limb(g.leg[0], -1, 5), legR: limb(g.leg[0], 1, 5), armL: limb(g.arm[0], -4, 10), armR: limb(g.arm[0], 4, 10),
+  };
+  // the hat sits pushed back a little, so you can see their face
+  cb.hat = new THREE.Group(); cb.hat.position.set(0, 18, 0); cb.hat.rotation.x = -.3; headG.add(cb.hat); mesh(g.hat[0], cb.hat);
+  cb.shadow = new THREE.Mesh(ovalGeo(7, 6), SHADOW_MAT); cb.shadow.scale.y = .1; cb.shadow.renderOrder = 2; world.add(cb.shadow);
+  cb.prop = prop(m.pivot, { grown: true });
+  // the pistol goes in the hand nearest the camera, whichever way they end up facing
+  cb.arm = side => {
+    cb.gunArm = side > 0 ? cb.armL : cb.armR;
+    const xs = side > 0 ? -3 : 2;
+    cb.holster = [holsterVB(dry, xs, true).geo(), holsterVB(wet, xs, false).geo(), holsterVB(dry, xs, false).geo()];
+    cb.holsterM = mesh(cb.holster[0], m.inner);
+    cb.gun = mesh(g.gun[0], cb.gunArm); cb.gun.visible = cb.gun.hull.visible = false;
+    cb.nozzle = new THREE.Object3D(); cb.nozzle.position.set(0, -9, 0); cb.gunArm.add(cb.nozzle);
+  };
+  cb.draw = () => { cb.gun.visible = cb.gun.hull.visible = true; setGeo(cb.holsterM, cb.holster[cb.wetNow ? 1 : 2]); };
+  cb.setFace = f => setGeo(cb.head, g.head[f]);
+  cb.soak = () => {
+    cb.wetNow = 1;
+    setGeo(cb.torso, g.torso[1]);
+    for (const l of [cb.legL, cb.legR]) setGeo(l.part, g.leg[1]);
+    for (const a of [cb.armL, cb.armR]) setGeo(a.part, g.arm[1]);
+    setGeo(cb.gun, g.gun[1]); setGeo(cb.holsterM, cb.holster[1]);
+    cb.setFace('soaked');
+  };
+  cowboys.push(cb);
+  return cb;
+}
+const _w = new THREE.Vector3(), _q = new THREE.Quaternion(), Z_AXIS = new THREE.Vector3(0, 0, 1);
+function updateCowboy(cb, dt) {
+  let legs = 0, bob = 0;
+  if (cb.walking) {
+    const ph = cb.walked / 2.4;
+    legs = Math.sin(ph) * .8;
+    bob = Math.abs(Math.cos(ph)) > .7 ? 1 : 0;
+    const step = Math.floor(ph / Math.PI);
+    if (step !== cb.lastStep) { cb.lastStep = step; if (cb.stepSound) sfx('step'); }
+  }
+  cb.legL.rotation.x = legs; cb.legR.rotation.x = -legs;
+  // arms: swinging when walking, the pistol arm out when aiming or up when they've won, both limp when soaked
+  const k = Math.min(1, dt * 14);
+  for (const a of [cb.armL, cb.armR]) {
+    const gun = a === cb.gunArm, side = a === cb.armL ? -1 : 1;
+    let rx = (a === cb.armL ? -legs : legs) * .7, rz = 0;
+    if (gun && cb.pose === 'aim') rx = -Math.PI / 2;
+    if (cb.pose === 'raise') { rx = gun ? -Math.PI * .95 : 0; rz = gun ? 0 : side * .25; }
+    if (cb.pose === 'soaked') { rx = .15; rz = side * .35; }
+    a.rotation.x += (rx - a.rotation.x) * k; a.rotation.z += (rz - a.rotation.z) * k;
+  }
+  cb.inner.position.y = bob;
+  cb.headG.rotation.y = -cb.prop.rot * .6;
+  // whole pixels only, and two cubes deep at a time (one screen pixel), so the art never smears
+  const x = Math.round(cb.fx) + (cb.jitter > 0 ? (Math.floor(clock * 22) % 2 ? 1 : -1) : 0);
+  const z = Math.round(cb.fz / 2) * 2;
+  cb.root.position.set(x, 0, z);
+  cb.shadow.position.set(x, .05, z);
+  cb.shadow.scale.x = cb.shadow.scale.z = propScale(cb.prop);
+  cb.jitter -= dt;
+}
+// walk in a straight line at `speed` screen pixels a second
+function walkTo(cb, x, z, speed) {
+  const sx = cb.fx, sz = cb.fz, dist = Math.hypot(x - sx, (z - sz) * SIN);
+  cb.walking = true;
+  return tween(dist / speed, k => { cb.fx = lerp(sx, x, k); cb.fz = lerp(sz, z, k); cb.walked = k * dist; })
+    .then(() => { cb.walking = false; });
+}
+function turn(cb, facing, dur = .3) {
+  const from = cb.prop.rot, to = yawOf(facing);
+  cb.facing = facing;
+  return tween(dur, k => { cb.prop.rot = lerp(from, to, k * k * (3 - 2 * k)); });
+}
+// where a cowboy's pistol nozzle is, in the duel's flat plane (where the water flies)
+function nozzleAt(cb) {
+  cb.nozzle.getWorldPosition(_w);
+  stage.root.worldToLocal(_w);
+  return { x: _w.x, y: _w.y };
+}
+
+// ---------------- the scene ----------------
+const canvas = $('c');
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
+renderer.setPixelRatio(1);
+renderer.setClearColor(0x000000, 0);
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 4000);
+const TH = Math.PI / 6, COS = Math.cos(TH), SIN = Math.sin(TH);   // the camera looks down 30°
+const MAT = new THREE.MeshBasicMaterial({ vertexColors: true });
+const GROUND_MAT = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: .34, depthWrite: false });
+const SHADOW_MAT = new THREE.MeshBasicMaterial({ color: 0x1a0a20, transparent: true, opacity: .22, depthWrite: false });
+const PUDDLE_MAT = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: .72, depthWrite: false });
+let PX = 7, W = 2, H = 2, cssLeft = 0, cssTop = 0;
+
+// The canvas is drawn at one pixel per art pixel and blown up, so it stays crisp. One world unit = one pixel across.
+function layout() {
+  PX = CFG.pixel || Math.max(2, Math.round(innerHeight / 150));
+  W = Math.ceil(innerWidth / PX / 2) * 2; H = Math.ceil(innerHeight / PX / 2) * 2;
+  renderer.setSize(W, H, false);
+  cssLeft = Math.floor((innerWidth - W * PX) / 2); cssTop = innerHeight - H * PX;
+  Object.assign(canvas.style, { width: W * PX + 'px', height: H * PX + 'px', left: cssLeft + 'px', top: cssTop + 'px' });
+  camera.left = -W / 2; camera.right = W / 2; camera.top = H / 2; camera.bottom = -H / 2;
+  camera.updateProjectionMatrix();
+  // the front edge of the ground sits 5 pixels off the bottom (its front face takes up most of them)
+  const ty = (H / 2 - 5) / COS;
+  camera.position.set(0, ty + SIN * 1000, COS * 1000);
+  camera.lookAt(0, ty, 0);
+  const r = document.documentElement.style, o = Math.max(2, Math.round(PX * .6));
+  r.setProperty('--p', PX + 'px');
+  r.setProperty('--ol', [[o, 0], [-o, 0], [0, o], [0, -o], [o, o], [-o, o], [o, -o], [-o, -o]].map(([x, y]) => `${x}px ${y}px 0 #1c120c`).join(','));
+}
+
+// Models are full 3D, but each one is tipped back to face the camera straight on, so they look flat (no
+// looking down on them) and every cube comes out exactly one pixel on screen. Only the ground shows depth. You see
+// they're solid when they turn round, or twist as they grow in and out. The pivot is what grows, shrinks and turns.
+function model(x, z, parent = world) {
+  const root = new THREE.Group(); root.position.set(x, 0, z); root.rotation.x = -TH;
+  const pivot = new THREE.Group(), inner = new THREE.Group();
+  root.add(pivot); pivot.add(inner); parent.add(root);
+  return { root, pivot, inner };
+}
+// a flat thing standing at (x, z) tipped back to face the camera (the sunset, and the plane the water flies in)
+function billboard(x, z, parent = world) {
+  const root = new THREE.Group(); root.position.set(x, 0, z); root.rotation.x = -TH;
+  const pivot = new THREE.Group(); root.add(pivot); parent.add(root);
+  return { root, pivot };
+}
+
+// ---------------- props growing in and out ----------------
+const easeOutBack = k => 1 + 2.4 * Math.pow(k - 1, 3) + 1.4 * Math.pow(k - 1, 2);
+let props = [];
+function prop(obj, { delay = 0, dur = .5, twist = 0, ground = false, grown = false, apply = null } = {}) {
+  const p = { obj, inAt: grown ? -Infinity : clock + delay, dur, twist, ground, apply, outAt: Infinity, outDur: .45, rot: obj.rotation.y };
+  props.push(p);
+  return p;
+}
+function propScale(p) {
+  const kin = (clock - p.inAt) / p.dur;
+  let e = kin <= 0 ? 0 : kin >= 1 ? 1 : easeOutBack(kin);
+  if (clock > p.outAt) { const ko = (clock - p.outAt) / p.outDur; e *= ko >= 1 ? 0 : 1 - ko * ko * (2.7 * ko - 1.7); }   // ease-in-back
+  return Math.max(1e-4, e);
+}
+function updateProps() {
+  for (const p of props) {
+    const e = propScale(p);
+    if (p.apply) { p.apply(e); continue; }
+    if (p.ground) p.obj.scale.set(1, e, e);
+    else p.obj.scale.setScalar(e);
+    p.obj.rotation.y = p.rot + p.twist * (1 - Math.min(1, e));
+  }
+}
+function shrinkAll(order) {
+  for (const p of props) p.outAt = Math.min(p.outAt, clock + order(p));
+}
+
+// ---------------- building the street ----------------
+const D = 36;          // how deep the ground goes
+const DUEL_Z = -12;    // where the duel happens
+const TOWN_Z = -34;    // the fronts of the buildings
+let world = null, stage = null, saloon = null, glow = null, cowboys = [], tumbleweeds = [], parts = [], puddle = null;
+
+// The ground runs under the town and tapers off at both ends: its front edge curves back toward the buildings
+// and its front face gets thinner, until there's nothing left.
+const TAPER = 30;
+function buildGround(r, x0, x1) {
+  const seed = Math.floor(r() * 1e9);
+  x0 = Math.max(Math.round(x0), -W / 2 - 2); x1 = Math.min(Math.round(x1), W / 2 + 2);
+  const fullness = x => { const e = clamp(Math.min(x - x0, x1 - x) / TAPER, 0, 1); return e * e * (3 - 2 * e); };
+  const frontOf = x => -D + Math.round(D * fullness(x + .5) / 2) * 2;   // in whole screen pixels (two cubes deep)
+  for (let cx = x0; cx < x1; cx += 16) {
+    const cw = Math.min(16, x1 - cx), mid = cx + cw / 2;
+    const g = new THREE.Group(); g.position.set(mid, 0, -D / 2); world.add(g);
+    // the see-through slab: its top (in bands, lighter at the front) and its front face, a column at a time
+    const pos = [], col = [];
+    const quad = (a, b, c, d, css) => { const k = linear(css); for (const v of [a, b, c, a, c, d]) { pos.push(...v); col.push(k.r, k.g, k.b); } };
+    for (let x = cx; x < cx + cw; x++) {
+      const zf = frontOf(x), th = Math.round(4 * fullness(x + .5));
+      if (zf <= -D) continue;
+      const X0 = x - mid, X1 = x + 1 - mid, o = D / 2;
+      for (const [f, b, css] of [[0, -6, '#f4dcaa'], [-6, -22, '#e8c88e'], [-22, -D + 4, '#dcb87c'], [-D + 4, -D, '#c9a46a']]) {
+        const zt = Math.min(f, zf), zb = b;
+        if (zt > zb) quad([X0, 0, zt + o], [X1, 0, zt + o], [X1, 0, zb + o], [X0, 0, zb + o], css);
+      }
+      if (th > 0) quad([X0, -th, zf + o], [X1, -th, zf + o], [X1, 0, zf + o], [X0, 0, zf + o], '#b08a58');
+    }
+    const slab = new THREE.BufferGeometry();
+    slab.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    slab.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    geos.push(slab);
+    const m = new THREE.Mesh(slab, GROUND_MAT); m.renderOrder = 1; g.add(m);
+    // a few small patches of dirt (two cubes deep to a screen pixel) and the odd pebble
+    const vox = [];
+    for (let x = cx; x < cx + cw; x++) for (let z = -D, zf = frontOf(x); z < zf; z += 2) {
+      const n = noise2(x / 16, z / 10, seed) * .75 + noise2(x / 5, z / 4, seed + 7) * .25;
+      if (n > .74) {
+        const css = n > .8 ? '#9a673a' : (x * 7 + z) % 5 === 0 ? '#c48a52' : '#b07a45';
+        vox.push([x - mid, -1, z + D / 2, css], [x - mid, -1, z + 1 + D / 2, css]);
+        if (z === zf - 2) for (let y = -4; y < -1; y++) vox.push([x - mid, y, z + 1 + D / 2, y === -2 ? '#9a673a' : '#7e5430']);
+      } else if (r() < .004) vox.push([x - mid, 0, z + D / 2, pick(['#8a7f72', '#a69a8a', '#6e655a'], r)]);
+    }
+    if (vox.length) { const dm = new THREE.Mesh(voxGeo(vox), MAT); dm.position.y = .02; g.add(dm); }
+    prop(g, { delay: Math.abs(mid) / (W / 2) * .5, dur: .5, ground: true });
+  }
+}
+
+// The saloon in the middle, and the jail, bank, hotel and general store either side of it, as many as fit.
+function buildTown(r) {
+  const placed = [];
+  const add = (b, x, half, delay) => {
+    const m = model(x, TOWN_Z);
+    m.inner.add(new THREE.Mesh(b.geo(), MAT));
+    prop(m.pivot, { delay, dur: .7, twist: pick([-.8, .8], r) });
+    placed.push([x - half, x + half]);
+    return m;
+  };
+  saloon = add(saloonB(r), 0, 36, .2);
+  saloon.inner.add(new THREE.Mesh(saloonInside(r).geo(), MAT));
+  saloon.doors = [-1, 1].map(side => {
+    const d = new THREE.Group(); d.position.set(side * 7, 0, 0);
+    d.add(new THREE.Mesh(batwing(side).geo(), MAT)); saloon.inner.add(d);
+    return d;
+  });
+  saloon.swingAt = -Infinity;
+  const order = shuffle(Object.keys(BUILDINGS), r);
+  let left = -37, right = 37;
+  order.forEach((k, i) => {
+    const [fn, half] = BUILDINGS[k], side = i % 2 ? 1 : -1, ring = i >> 1;
+    const x = side > 0 ? right + 1 + half : left - 1 - half;
+    if (Math.abs(x) - half * .3 > W / 2) return;   // doesn't fit (a bit hanging off the edge is fine)
+    add(fn(r), x, half, .4 + ring * .2);
+    if (side > 0) right = x + half; else left = x - half;
+  });
+  // two horses tied up out front, watching
+  makeHorse(-27, -24, 70 * Math.PI / 180, r, .75);
+  makeHorse(27, -24, -70 * Math.PI / 180, r, .85);
+  return [left, right];
+}
+
+// The sunset: a dithered glow behind the town and a striped sun that rises as the town grows in (and sets again).
+function buildGlow(r) {
+  const gw = W, gh = Math.max(40, Math.min(H - 20, 110));
+  const cv = document.createElement('canvas'); cv.width = gw; cv.height = gh;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(gw, gh);
+  const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+  const bands = [[.22, [255, 210, 120]], [.4, [255, 150, 84]], [.58, [255, 100, 118]], [.78, [196, 82, 166]], [9, [120, 72, 172]]];
+  const sx = Math.round(gw / 2 + W * .2), sy = 40, sr = 16, gx = gw / 2 + W * .1;
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+    const up = gh - 1 - y, i = (y * gw + x) * 4, th = (BAYER[(y % 4) * 4 + (x % 4)] + .5) / 16;
+    // rings of color round a point low behind the town, fading out toward the edges and the top
+    const dd = Math.hypot((x - gx) / (gw * .62), up / gh);
+    let a = Math.pow(Math.max(0, 1 - dd), 1.4) * Math.min(1, up / 12) * .8;
+    a = Math.floor(a / .1 + th) * .1;   // posterized, dithered between steps
+    let c = bands.find(b => dd < b[0])[1];
+    // the sun, its lower half cut by stripes
+    const d = Math.hypot(x - sx, up - sy);
+    if (d < sr && !(up < sy && (sy - up) % 4 < (sy - up) / 6)) { c = up > sy + 6 ? [255, 236, 140] : up > sy - 4 ? [255, 196, 96] : [255, 140, 80]; a = .92; }
+    img.data.set([...c, Math.round(clamp(a, 0, 1) * 255)], i);
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.magFilter = tex.minFilter = THREE.NearestFilter; tex.generateMipmaps = false; tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, opacity: 0 });
+  const geo = new THREE.PlaneGeometry(gw, gh); geos.push(geo);
+  glow = billboard(0, -52);
+  const mesh = new THREE.Mesh(geo, mat); mesh.renderOrder = -1; glow.pivot.add(mesh);
+  glow.dispose = () => { tex.dispose(); mat.dispose(); };
+  prop(mesh, { delay: .1, dur: 1.1, apply: e => { const k = Math.min(1, e); mat.opacity = k; mesh.position.y = Math.round(gh / 2 - 4 - (1 - k) * 18); } });
+}
+
+function saguaro(r) {
+  const m = new Map(), h = 18 + Math.floor(r() * 10);
+  const shade = ['#2f6e30', '#3e8a3c', '#4f9e44', '#3e8a3c', '#5aaa4a'];
+  for (let y = 0; y < h; y++) for (let x = -2; x <= 2; x++) {
+    if (y === h - 1 && Math.abs(x) === 2) continue;
+    m.set(ck(x, y), { c: shade[x + 2], d: Math.abs(x) <= 1 ? 5 : 3 });
+  }
+  const arms = r() < .3 ? [] : r() < .5 ? [pick([-1, 1], r)] : [-1, 1];
+  for (const s of arms) {
+    const ay = Math.floor(h * range(.3, .55, r)), len = 2 + Math.floor(r() * 2), up = 5 + Math.floor(r() * 6);
+    for (let i = 3; i <= 2 + len; i++) for (let y = ay; y < ay + 3; y++) m.set(ck(s * i, y), { c: y === ay + 2 ? '#4f9e44' : '#3e8a3c', d: 3 });
+    for (let j = 0; j < 3; j++) for (let y = ay; y < ay + up; y++) {
+      const x = s * (3 + len + j);
+      if ((j === 2 && y === ay) || (y === ay + up - 1 && j !== 1)) continue;
+      m.set(ck(x, y), { c: s * (j - 1) < 0 ? '#2f6e30' : j === 1 ? '#4f9e44' : '#5aaa4a', d: 3 });
+    }
+  }
+  if (r() < .45) for (const x of [-1, 0, 1]) m.set(ck(x, h), { c: x ? '#ffb0cc' : '#ff6a9a', d: 3 });
+  return m;
+}
+function barrelCactus(r) {
+  const m = new Map(), h = 6 + Math.floor(r() * 3);
+  for (let y = 0; y < h; y++) for (let x = -3; x <= 3; x++) {
+    const ey = (y + .5 - h / 2) / (h / 2), ex = x / 3.5;
+    if (ex * ex + ey * ey > 1.05) continue;
+    m.set(ck(x, y), { c: x % 2 ? '#3e8a3c' : x > 0 ? '#5aaa4a' : '#4a9a40', d: 5 - Math.abs(x) % 2 * 2 });
+  }
+  const fc = pick(['#ffd84a', '#ff6a9a', '#ff9a3a'], r);
+  for (const x of [-1, 0, 1]) m.set(ck(x, h), { c: x ? fc : '#fff4c0', d: 3 });
+  return m;
+}
+function grassTuft(r) {
+  const m = new Map(), w = 1 + Math.floor(r() * 2);
+  for (let x = -w; x <= w; x++) {
+    const hh = 1 + Math.floor(r() * (x === 0 ? 3 : 2));
+    for (let y = 0; y < hh; y++) m.set(ck(x, y), { c: y === hh - 1 ? pick(['#b8c058', '#c8b860', '#9ab048'], r) : pick(['#6f8f3a', '#7a9a3a'], r), d: 1 });
+  }
+  return m;
+}
+// a couple of cacti at the ends of the street and a few tufts of grass
+function buildProps(r, P, x0, x1) {
+  const lim = W / 2 - 6;
+  for (const s of [-1, 1]) {
+    const end = s > 0 ? x1 : x0;
+    if (Math.abs(end) + 8 < lim) {
+      const m = model(Math.round(end + s * range(6, 10, r)), -2 * Math.round(range(14, 17, r)));
+      m.inner.add(new THREE.Mesh(spriteGeo(saguaro(r), '#1d3018'), MAT));
+      prop(m.pivot, { delay: .7 + r() * .3, dur: .55, twist: pick([-1.2, 1.2], r) });
+    }
+    if (r() < .6) {
+      const x = Math.round(s * range(P + 22, Math.max(P + 24, lim), r));
+      if (Math.abs(x) > lim || x < x0 || x > x1) continue;
+      const m = model(x, -2 * Math.round(range(1, 3, r)));
+      m.inner.add(new THREE.Mesh(spriteGeo(r() < .6 ? barrelCactus(r) : saguaro(r), '#1d3018'), MAT));
+      prop(m.pivot, { delay: .8 + r() * .3, dur: .55, twist: pick([-1.2, 1.2], r) });
+    }
+  }
+  for (let i = 0, n = Math.round((x1 - x0) / 34); i < n; i++) {
+    const x = Math.round(range(x0 + 2, x1 - 2, r)), z = -2 * Math.round(range(1, 8, r));
+    if (Math.abs(z - DUEL_Z) < 4 && Math.abs(x) < P + 10) continue;   // not where the duelists stand
+    const m = model(x, z);
+    m.inner.add(new THREE.Mesh(spriteGeo(grassTuft(r)), MAT));
+    prop(m.pivot, { delay: .8 + r() * .5, dur: .35 });
+  }
+}
+
+// a ball of twigs that rolls across, bouncing
+function makeTumbleweed(dir, z, speed) {
+  const r = rnd, vox = [];
+  for (let x = -5; x < 5; x++) for (let y = -5; y < 5; y++) for (let zz = -5; zz < 5; zz++) {
+    const d = Math.hypot(x + .5, y + .5, zz + .5);
+    if (d <= 4.9 && d >= 2.6 && r() < .5) vox.push([x, y, zz, pick(['#b08a50', '#8a6a3a', '#c9a46a', '#9a7442'], r)]);
+  }
+  const g = new THREE.Group(), m = new THREE.Mesh(voxGeo(vox), MAT);
+  g.add(m); world.add(g);
+  const tw = { g, m, x: -dir * (W / 2 + 10), z, dir, speed, phase: 0 };
+  g.position.set(tw.x, 5, z);
+  tumbleweeds.push(tw);
+  prop(g, { dur: .3 });
+  sfx('wind');
+  return tw;
+}
+
+// a flat oval lying on the ground (shadows and puddles)
+function ovalGeo(rx, rz, css = '#000', rim) {
+  const vox = [];
+  for (let x = -rx; x < rx; x++) for (let z = -rz; z < rz; z += 2) {
+    const e = ((x + .5) / rx) ** 2 + ((z + 1) / rz) ** 2;
+    if (e <= 1) { const c = rim && e > .55 ? rim : css; vox.push([x, 0, z, c], [x, 0, z + 1, c]); }
+  }
+  return voxGeo(vox);
+}
+
+// ---------------- water ----------------
+const MAXP = 900;
+let partMesh = null;
+const _m = new THREE.Object3D(), _c = new THREE.Color();
+const WATER = ['#e8fbff', '#a8e6ff', '#6ccfff', '#ffffff', '#8adcff'];
+function spawn(x, y, vx, vy, kind, o = {}) {
+  if (parts.length >= MAXP) return;
+  parts.push({ x, y, vx, vy, kind, g: o.g ?? 150, life: o.life ?? 3, size: o.size ?? 1, col: o.col || pick(WATER) });
+}
+let duelState = null;
+function updateParts(dt) {
+  const s = duelState;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.vy -= p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+    let dead = p.life <= 0;
+    if (p.kind === 'stream' && s && (p.x - s.hitX) * s.dirW >= 0 && p.y > 0 && p.y < 24) {
+      dead = true; s.onHit(p);
+    } else if (p.y <= 0 && p.kind !== 'mist') {
+      dead = true;
+      if (s && puddle && Math.abs(p.x - s.loser.fx) < 13) s.puddle = Math.min(1, s.puddle + .012);
+      if (p.kind !== 'splat' && Math.random() < .3) spawn(p.x, .5, range(-20, 20), range(10, 30), 'splat', { life: .4, g: 200 });
+    }
+    if (dead) parts.splice(i, 1);
+  }
+  partMesh.count = parts.length;
+  parts.forEach((p, i) => {
+    _m.position.set(Math.round(p.x) + .5, Math.round(p.y) + .5, 8); _m.scale.setScalar(p.size); _m.updateMatrix();
+    partMesh.setMatrixAt(i, _m.matrix); partMesh.setColorAt(i, _c.set(p.col));
+  });
+  partMesh.instanceMatrix.needsUpdate = true;
+  if (partMesh.instanceColor) partMesh.instanceColor.needsUpdate = true;
+}
+
+// ---------------- sound effects (made on the fly, no files) ----------------
+let ac = null, master = null, noiseBuf = null;
+function audio() {
+  if (!CFG.volume) return null;
+  if (!ac) {
+    try {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      master = ac.createGain(); master.gain.value = CFG.volume / 100 * .5; master.connect(ac.destination);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    } catch (e) { return null; }
+  }
+  if (ac.state === 'suspended') ac.resume().catch(() => {});
+  return ac;
+}
+function env(g, t, a, peak, rel) { g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(peak, t + a); g.gain.exponentialRampToValueAtTime(.0001, t + a + rel); }
+function noise(t, dur, type, freq, q, peak, a = .005) {
+  const s = ac.createBufferSource(); s.buffer = noiseBuf;
+  const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+  const g = ac.createGain(); env(g, t, a, peak, dur);
+  s.connect(f).connect(g).connect(master); s.start(t, Math.random()); s.stop(t + a + dur + .05);
+  return { f, g };
+}
+function tone(t, type, f0, f1, dur, peak, a = .005) {
+  const o = ac.createOscillator(); o.type = type; o.frequency.setValueAtTime(f0, t);
+  if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  const g = ac.createGain(); env(g, t, a, peak, dur);
+  o.connect(g).connect(master); o.start(t); o.stop(t + a + dur + .05);
+}
+function sfx(kind) {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime;
+  if (kind === 'step') noise(t, .07, 'lowpass', 600, 1, .5);
+  else if (kind === 'pop') tone(t, 'sine', 260, 620, .09, .12);
+  else if (kind === 'creak') { tone(t, 'sawtooth', 210, 140, .35, .05, .05); tone(t + .25, 'sawtooth', 190, 150, .3, .04, .05); }
+  else if (kind === 'neigh') { tone(t, 'sawtooth', 700, 980, .18, .05, .03); tone(t + .16, 'sawtooth', 980, 520, .45, .05, .02); }
+  else if (kind === 'bell') { tone(t, 'sine', 1046, 1040, 1.6, .35); tone(t, 'sine', 2620, 2600, .9, .12); tone(t, 'triangle', 523, 520, 1.2, .1); }
+  else if (kind === 'squirt') {
+    const n = noise(t, 1.1, 'bandpass', 2400, 1.2, .5, .02);
+    const l = ac.createOscillator(), lg = ac.createGain(); l.frequency.value = 14; lg.gain.value = 600;
+    l.connect(lg).connect(n.f.frequency); l.start(t); l.stop(t + 1.2);
+  }
+  else if (kind === 'dribble') for (let i = 0; i < 3; i++) tone(t + i * .16, 'sine', 900, 380, .08, .14);
+  else if (kind === 'splash') { noise(t, .5, 'lowpass', 1600, .8, .6); noise(t + .03, .3, 'highpass', 3500, .7, .2); }
+  else if (kind === 'shake') for (let i = 0; i < 8; i++) noise(t + i * .07, .05, 'highpass', 2500, 1, .18);
+  else if (kind === 'win') [523, 659, 784, 1046].forEach((f, i) => tone(t + i * .11, 'square', f, f, i === 3 ? .5 : .1, .07));
+  else if (kind === 'wind') {
+    const n = noise(t, 2.6, 'bandpass', 500, 4, .25, .8);
+    n.f.frequency.setValueAtTime(380, t); n.f.frequency.linearRampToValueAtTime(900, t + 1.4); n.f.frequency.linearRampToValueAtTime(420, t + 3);
+  }
+}
+
+// ---------------- the clock, waits and tweens ----------------
+let clock = 0, lastT = 0, running = false, raf = 0, tasks = new Set(), run = 0;
+// (testing: timer=1 steps on timers instead of animation frames, so headless screenshots move on)
+const nextFrame = Q.get('timer') === '1' ? f => setTimeout(() => f(performance.now()), 16) : requestAnimationFrame;
+const cancelFrame = Q.get('timer') === '1' ? clearTimeout : cancelAnimationFrame;
+function tween(dur, fn) { return new Promise(res => tasks.add({ t0: clock, dur, fn, res, run })); }
+const wait = s => tween(s, null);
+function loop(t) {
+  raf = nextFrame(loop);
+  const now = t / 1000, dt = Math.min(.05, Math.max(0, now - lastT)); lastT = now; clock += dt;
+  for (const k of [...tasks]) {
+    const e = k.dur > 0 ? Math.min(1, (clock - k.t0) / k.dur) : 1;
+    if (k.fn) k.fn(e, dt);
+    if (e >= 1) { tasks.delete(k); k.res(); }
+  }
+  updateProps();
+  for (const cb of cowboys) updateCowboy(cb, dt);
+  for (const h of horses) {
+    h.head.rotation.x = Math.sin(clock * .9 + h.ph) * .07 + Math.max(0, Math.sin(clock * .31 + h.ph) - .8) * 1.6;
+    h.tail.rotation.y = Math.sin(clock * 2.3 + h.ph) * .4;
+  }
+  if (saloon) {
+    const st = clock - saloon.swingAt, ang = st > 0 ? 1.25 * Math.exp(-2.2 * st) * Math.cos(st * 8) : 0;
+    saloon.doors[0].rotation.y = -ang; saloon.doors[1].rotation.y = ang;
+  }
+  for (const tw of tumbleweeds) {
+    tw.x += tw.dir * tw.speed * dt; tw.phase += tw.speed * dt / 22;
+    tw.g.position.set(Math.round(tw.x), 5 + Math.abs(Math.sin(tw.phase * Math.PI)) * 7, tw.z);
+    tw.m.rotation.z -= tw.dir * tw.speed * dt / 5;
+  }
+  if (duelState?.tick) duelState.tick(dt);
+  if (partMesh) updateParts(dt);
+  placeLabels();
+  renderer.render(scene, camera);
+}
+
+// ---------------- names and banners ----------------
+const _v = new THREE.Vector3();
+function toCss(obj, x, y) {
+  obj.localToWorld(_v.set(x, y, 0)).project(camera);
+  return [cssLeft + (_v.x + 1) / 2 * W * PX, cssTop + (1 - _v.y) / 2 * H * PX];
+}
+function placeLabels() {
+  cowboys.slice(0, 2).forEach((cb, i) => {
+    const el = $(i ? 'nB' : 'nA'), [x, y] = toCss(cb.root, 0, 25);
+    el.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
+  });
+  if (saloon) {
+    const [x, y] = toCss(saloon.root, 0, 52);
+    $('ban').style.top = Math.max(8 + $('ban').offsetHeight, Math.round(y)) + 'px';
+    $('ban').style.left = Math.round(x) + 'px';
+  }
+}
+function banner(title, sub = '', winColor) {
+  const b = $('ban');
+  $('banT').textContent = ''; $('banS').textContent = sub;
+  if (winColor) {
+    const w = document.createElement('span'); w.className = 'w'; w.textContent = title; b.style.setProperty('--wc', winColor);
+    $('banT').append(w, ' wins!');
+  } else $('banT').textContent = title;
+  b.classList.remove('on', 'off'); void b.offsetWidth; b.classList.add('on');
+}
+function bannerOff() { const b = $('ban'); if (b.classList.contains('on')) { b.classList.remove('on'); b.classList.add('off'); } }
+
+// ---------------- pronouns (cowboy or cowgirl) ----------------
+// Twitch chatters' pronouns from the Chat Pronouns extension's public database (pronouns.alejo.io). He/him gets a
+// cowboy, she/her a cowgirl, and everyone else (or anyone who hasn't set them) one or the other.
+const PRONOUNS = { hehim: 'he', sheher: 'she', theythem: 'they', shethey: 'she', hethey: 'he', heshe: 'he', xexem: 'xe', faefaer: 'fae',
+  vever: 've', aeaer: 'ae', ziehir: 'zie', perper: 'per', itits: 'it', eem: 'e', any: 'any', other: 'other', ask: 'ask', avoid: 'avoid' };
+const pronounCache = new Map();
+function pronounsOf(login, plat) {
+  const k = String(login || '').toLowerCase();
+  if (!CFG.pronouns || !/^\w{1,25}$/.test(k) || !['twitch', 'custom'].includes(plat)) return Promise.resolve(null);
+  if (!pronounCache.has(k)) pronounCache.set(k, (async () => {
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 3000);
+    try {
+      const r = await fetch(`https://api.pronouns.alejo.io/v1/users/${k}`, { signal: ctl.signal });
+      if (!r.ok) return null;
+      const j = await r.json(), id = (Array.isArray(j) ? j[0] : j)?.pronoun_id;
+      return PRONOUNS[id] || null;
+    } catch (e) { return null; } finally { clearTimeout(t); }
+  })());
+  return pronounCache.get(k);
+}
+const styleOf = p => p === 'he' ? 'boy' : p === 'she' ? 'girl' : 'any';
+const theirOf = p => ({ he: 'his', she: 'her', it: 'its' }[p] || 'their');
+
+// ---------------- a duel ----------------
+let busy = false, lastEnd = -Infinity;
+async function duel(A, B, winner) {
+  busy = true;
+  const myRun = ++run;
+  const alive = () => run === myRun;
+  const prons = Promise.all([pronounsOf(A.login, A.plat), pronounsOf(B.login, B.plat)]);
+  layout();
+  rnd = rngOf(Date.now() ^ hash(A.name + B.name));
+  const r = rnd;
+  world = new THREE.Group(); scene.add(world);
+  stage = billboard(0, DUEL_Z);
+  stage.root.updateMatrixWorld(true);
+  partMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial(), MAXP);
+  geos.push(partMesh.geometry);
+  for (let i = 0; i < MAXP; i++) partMesh.setColorAt(i, _c.set('#fff'));
+  partMesh.count = 0; partMesh.frustumCulled = false; stage.pivot.add(partMesh);
+  const P = Math.round(clamp(W * .3, 40, 100));   // how far apart they end up (each side of the middle)
+  const [tx0, tx1] = buildTown(r);
+  buildGround(r, tx0 - TAPER, tx1 + TAPER);
+  buildGlow(r);
+  buildProps(r, P, tx0 - 4, tx1 + 4);
+  canvas.classList.add('on');
+  if (!running) { running = true; lastT = performance.now() / 1000; raf = nextFrame(loop); }
+  for (let i = 0; i < 5; i++) setTimeout(() => alive() && sfx('pop'), 120 + i * 190);
+  setTimeout(() => alive() && sfx('neigh'), 1300);
+
+  const nA = $('nA'), nB = $('nB');
+  nA.textContent = A.name; nB.textContent = B.name;
+  banner('Duel!', `${A.name} challenges ${B.name}`);
+  if (r() < .6) setTimeout(() => alive() && makeTumbleweed(pick([-1, 1]), -2 * Math.round(range(8, 11)), range(28, 40)), 900);
+  const [pA, pB] = await Promise.race([prons, new Promise(res => setTimeout(() => res([null, null]), 1500))]);
+  await wait(1.5); if (!alive()) return;
+
+  // out through the swinging doors (facing you), into the street, back to back
+  const START = TOWN_Z - 8;
+  const cA = makeCowboy(A, A.plat === 'demo' ? pick(['boy', 'girl', 'any']) : styleOf(pA), 0, START);
+  const cB = makeCowboy(B, B.plat === 'demo' ? pick(['boy', 'girl', 'any']) : styleOf(pB), 0, START, cA.look.pal.G);
+  cA.arm(1); cB.arm(-1);   // A ends up on the left facing right, B on the right facing left
+  nA.style.setProperty('--c', cA.look.pal.C); nB.style.setProperty('--c', cB.look.pal.C);
+  const out = async (cb, x, f) => {
+    saloon.swingAt = clock + .15; sfx('creak'); cb.stepSound = true;
+    await walkTo(cb, x, DUEL_Z, 15); cb.stepSound = false;
+    await turn(cb, f, .25);
+  };
+  const wA = out(cA, -4, -1);
+  await wait(1.15); if (!alive()) return;
+  const wB = out(cB, 4, 1);
+  await Promise.all([wA, wB]); if (!alive()) return;
+  bannerOff();
+  if (CFG.names) { nA.classList.add('on'); nB.classList.add('on'); }
+  await wait(.7); if (!alive()) return;
+
+  // ten paces... well, five
+  let shown = 0;
+  cA.walking = cB.walking = true; cA.stepSound = true;
+  await tween(4.2, k => {
+    cA.fx = lerp(-4, -P, k); cB.fx = lerp(4, P, k); cA.walked = cB.walked = k * (P - 4);
+    const n = Math.min(5, Math.floor(k * 5) + 1);
+    if (n !== shown && k < .98) { shown = n; banner(String(n)); }
+  });
+  cA.walking = cB.walking = false; cA.stepSound = false;
+  bannerOff();
+  await wait(.45); if (!alive()) return;
+  await Promise.all([turn(cA, 1, .35), turn(cB, -1, .35)]); if (!alive()) return;
+
+  // ...a tumbleweed rolls by...
+  makeTumbleweed(pick([-1, 1]), -6, range(55, 75));
+  await wait(range(1.4, 2.6)); if (!alive()) return;
+
+  // DRAW!
+  banner('Draw!');
+  sfx('bell');
+  const win = winner === 2 ? cB : winner === 1 ? cA : r() < .5 ? cA : cB, lose = win === cA ? cB : cA;
+  const dirW = win.facing;
+  const s = duelState = {
+    loser: lose, dirW, hitX: Math.round(lose.fx) - dirW * 3, soaked: false, puddle: 0, streaming: false, drip: 0,
+    onHit(p) {
+      for (let i = 0; i < 2; i++) spawn(p.x, p.y, -dirW * range(10, 50), range(20, 70), 'splash', { life: 1 });
+      if (s.soaked) return;
+      s.soaked = true;
+      lose.soak(); lose.pose = 'soaked';
+      sfx('splash');
+      // the hat comes off
+      const hp = lose.hat;
+      stage.pivot.attach(hp);
+      s.hat = { mesh: hp, q0: hp.quaternion.clone(), x: hp.position.x, y: hp.position.y, vx: dirW * range(35, 50), vy: 75, spin: -dirW * 9, ang: 0, landed: false };
+      prop(hp, { grown: true, apply: e => hp.scale.setScalar(e) });
+      puddle = new THREE.Mesh(ovalGeo(11, 7, '#7fd0ff', '#b8ecff'), PUDDLE_MAT);
+      puddle.position.set(Math.round(lose.fx), .12, DUEL_Z); puddle.scale.set(1e-4, .1, 1e-4); puddle.renderOrder = 3; world.add(puddle);
+      s.puddleProp = prop(puddle, { grown: true, apply: () => {} });
+    },
+    tick(dt) {
+      if (s.streaming) {
+        const n = nozzleAt(win);
+        for (let i = 0, k = Math.round(320 * dt + Math.random()); i < k; i++) {
+          const vx = dirW * range(215, 245), t = Math.max(.05, Math.abs(s.hitX - n.x) / Math.abs(vx)), ty = range(6, 12), g = 140;
+          spawn(n.x, n.y + range(-.5, .5), vx, (ty - n.y + .5 * g * t * t) / t, 'stream', { g, life: 3 });
+        }
+      }
+      if (s.soaked) {
+        s.drip -= dt;
+        if (s.drip <= 0) { s.drip = .06; spawn(Math.round(lose.fx) + range(-5, 6), range(3, 19), 0, 0, 'drop', { g: 170 }); }
+        // it grows as the drips land (and still shrinks away with everything else at the end)
+        if (puddle) { const k = Math.min(1, s.puddle + .25) * propScale(s.puddleProp); puddle.scale.set(k, .1, k); }
+      }
+      const h = s.hat;
+      if (h && !h.landed) {
+        h.vy -= 220 * dt; h.x += h.vx * dt; h.y += h.vy * dt;
+        h.ang += h.spin * dt;
+        h.mesh.quaternion.copy(h.q0).premultiply(_q.setFromAxisAngle(Z_AXIS, h.ang));
+        if (h.y <= 0) { h.y = 0; h.landed = true; h.mesh.quaternion.copy(h.q0); spawn(h.x, 1, 0, 30, 'splat', { life: .3 }); }
+        h.mesh.position.x = Math.round(h.x); h.mesh.position.y = h.y;
+      }
+    },
+  };
+  await wait(.12); if (!alive()) return;
+  win.draw(); win.pose = 'aim';
+  await wait(.15); if (!alive()) return;
+  s.streaming = true; sfx('squirt');
+  // the loser is a bit slow on the draw, and their pistol's nearly empty
+  setTimeout(() => {
+    if (!alive()) return;
+    lose.draw();
+    if (!s.soaked) lose.pose = 'aim';
+    sfx('dribble');
+    for (let i = 0; i < 5; i++) setTimeout(() => {
+      if (!alive() || s.soaked) return;
+      const n = nozzleAt(lose);
+      spawn(n.x, n.y, lose.facing * range(8, 20), range(0, 10), 'drop', { g: 170 });
+    }, i * 110);
+  }, 300);
+  await wait(1.05); if (!alive()) return;
+  s.streaming = false;
+  await wait(.45); if (!alive()) return;
+
+  // the winner blows the last drops off the end, the loser shakes themselves off
+  win.pose = 'raise'; win.setFace('happy');
+  await wait(.2); if (!alive()) return;
+  const n = nozzleAt(win);
+  for (let i = 0; i < 8; i++) spawn(n.x, n.y + i * .3, range(-4, 4), range(8, 16), 'mist', { g: -6, life: .9, col: '#e8fbff' });
+  const L = lose.who.name, their = theirOf(lose === cA ? pA : pB);
+  banner(win.who.name, pick([`${L} got soaked!`, `${L} is drippin' wet!`, `${L} needs a towel!`, `${L} lost ${their} hat!`]), win.look.pal.C);
+  sfx('win');
+  await wait(.5); if (!alive()) return;
+  lose.jitter = .8; sfx('shake');
+  for (let i = 0; i < 26; i++) spawn(Math.round(lose.fx) + range(-6, 6), range(4, 20), range(-70, 70), range(20, 80), 'spray', { life: 1.2 });
+  await wait(CFG.hold); if (!alive()) return;
+
+  // everything shrinks away: the cowboys first, then the town, the ground last (from the ends in), and the sun sets
+  bannerOff(); nA.classList.remove('on'); nB.classList.remove('on');
+  s.streaming = false;
+  for (const c of cowboys) c.prop.twist = pick([-1.3, 1.3]);
+  shrinkAll(p => cowboys.some(c => c.prop === p) || p.obj === puddle || p.obj === s.hat?.mesh ? r() * .15
+    : p.ground ? .55 + (1 - Math.abs(p.obj.position.x) / (W / 2)) * .5 : p.apply ? .5 : .2 + r() * .45);
+  await wait(1.6); if (!alive()) return;
+  teardown();
+  lastEnd = performance.now();
+  busy = false;
+  if (CFG.demo) setTimeout(runDemoDuel, 2500);
+}
+
+function teardown() {
+  run++;
+  tasks.clear();
+  cancelFrame(raf); running = false;
+  if (world) scene.remove(world);
+  if (glow) glow.dispose();
+  for (const g of geos) g.dispose();
+  geos = []; props = []; cowboys = []; tumbleweeds = []; parts = []; horses = [];
+  world = stage = saloon = glow = partMesh = puddle = duelState = null;
+  renderer.clear();
+  canvas.classList.remove('on');
+  for (const id of ['nA', 'nB']) $(id).classList.remove('on');
+  $('ban').classList.remove('on', 'off');
+}
+
+// ---------------- who's duelling who ----------------
+const RECENT_MS = 10 * 60000;
+const recent = new Map();   // chatters seen, lower-case name → { name, color, login, plat, at }
+function remember(name, color, login, plat) {
+  const k = name.toLowerCase();
+  recent.delete(k); recent.set(k, { name, color, login: login || name, plat, at: performance.now() });
+  if (recent.size > 500) recent.delete(recent.keys().next().value);
+}
+const cleanName = s => String(s || '').trim().split(/\s+/)[0].replace(/^@+/, '').replace(/[^\p{L}\p{N}_.-]/gu, '').slice(0, 25);
+// returns why it didn't start, or '' if it did
+function challenge(from, fromColor, arg, { owner = false, mod = false, force = false, winner, login, plat = 'custom' } = {}) {
+  if (busy) return 'busy';
+  const left = CFG.cooldown * 1000 - (performance.now() - lastEnd);
+  if (left > 0 && !force && !owner && !(mod && CFG.modskip)) return 'cooldown';
+  // you can only duel someone who has chatted in the last 10 minutes (the host bar and window.duel can duel anyone)
+  const me = from.toLowerCase(), live = c => c && performance.now() - c.at < RECENT_MS;
+  let target = cleanName(arg), info = null;
+  if (!target) {
+    const pool = [...recent.values()].filter(c => c.name.toLowerCase() !== me && live(c));
+    if (!pool.length) return 'nobody';
+    info = pick(pool);
+  } else {
+    if (target.toLowerCase() === me) return 'self';
+    info = recent.get(target.toLowerCase());
+    if (!live(info) && !force) return 'unseen';
+  }
+  duel({ name: from, color: fromColor, login: login || from, plat },
+    { name: info?.name || target, color: info?.color, login: info?.login || target, plat: info?.plat || plat }, winner);
+  return '';
+}
+function stop() { if (busy) { teardown(); busy = false; lastEnd = performance.now(); } }
+window.duel = {
+  start: (a, b, o = {}) => challenge(cleanName(a) || 'Stranger', o.color, b, { force: true, winner: o.winner }),
+  stop,
+};
+
+// ---------------- chat ----------------
+function handleChat({ name, text, platform = 'custom', owner = false, mod = false, vip = false, color, login }) {
+  if (!name) return;
+  const plain = (text || '').replace(/^\x01ACTION |\x01$/g, '').trim(), cmd = plain.split(/\s+/)[0].toLowerCase(), arg = plain.slice(cmd.length).trim();
+  if (platform !== 'demo') remember(name, color, login, platform);
+  if (cmd !== CFG.cmd) return;
+  const ok = owner || ALLOW.has(String(name).toLowerCase()) || CFG.who === 'everyone' || (CFG.who === 'mods' && mod) || (CFG.who === 'vips' && (mod || vip));
+  if (ok) challenge(name, color, arg, { owner, mod, login, plat: platform });
+}
+
+// ---------------- Twitch (anonymous IRC over WebSocket) ----------------
+function parseTags(raw) {
+  const o = {};
+  const un = v => v.replace(/\\(.)/g, (_, c) => ({ s: ' ', ':': ';', '\\': '\\', r: '\r', n: '\n' }[c] ?? c));
+  raw.split(';').forEach(kv => { const i = kv.indexOf('='); o[kv.slice(0, i)] = un(kv.slice(i + 1)); });
+  return o;
+}
+function connectTwitch(channel) {
+  const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+  ws.onopen = () => {
+    ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 80000));
+    ws.send('JOIN #' + channel);
+  };
+  ws.onmessage = (ev) => {
+    for (const line of ev.data.split('\r\n')) {
+      if (!line) continue;
+      if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); continue; }
+      const m = /^(?:@(\S+) )?:([^!\s]+)![^ ]+ PRIVMSG #\S+ :(.*)$/.exec(line);
+      if (!m) continue;
+      const tags = m[1] ? parseTags(m[1]) : {}, badges = tags.badges || '';
+      handleChat({ name: tags['display-name'] || m[2], login: m[2], text: m[3], platform: 'twitch', color: tags.color,
+        owner: /(^|,)broadcaster\//.test(badges) || m[2] === channel,
+        mod: tags.mod === '1' || /(^|,)moderator\//.test(badges),
+        vip: tags.vip === '1' || /(^|,)vip\//.test(badges) });
+    }
+  };
+  ws.onclose = () => setTimeout(() => connectTwitch(channel), 3000);
+}
+
+// ---------------- Kick (anonymous, Kick's public Pusher chat socket) ----------------
+const KICK_PUSHER = 'wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false';
+async function connectKick(slug) {
+  let chatroom;
+  try {
+    const r = await fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`);
+    chatroom = (await r.json()).chatroom?.id;
+    if (!chatroom) throw new Error('no chatroom');
+  } catch (e) { console.warn('[duel] Kick channel lookup failed for', slug, e); return setTimeout(() => connectKick(slug), 30000); }
+  kickSocket(chatroom);
+}
+function kickSocket(chatroom) {
+  const ws = new WebSocket(KICK_PUSHER);
+  ws.onmessage = (ev) => {
+    let o; try { o = JSON.parse(ev.data); } catch { return; }
+    if (o.event === 'pusher:connection_established') {
+      ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { auth: '', channel: `chatrooms.${chatroom}.v2` } }));
+      return;
+    }
+    if (o.event === 'pusher:ping') { ws.send(JSON.stringify({ event: 'pusher:pong', data: {} })); return; }
+    let d; try { d = typeof o.data === 'string' ? JSON.parse(o.data) : o.data; } catch { return; }
+    if (!d || String(o.event).split('\\').pop() !== 'ChatMessageEvent') return;
+    const s = d.sender || {}, badges = (s.identity?.badges || []).map(b => b.type);
+    handleChat({ name: s.username, text: (d.content || '').replace(/\[emote:\d+:([^\]]+)\]/g, '$1'), platform: 'kick', color: s.identity?.color,
+      owner: badges.includes('broadcaster') || String(s.slug || s.username || '').toLowerCase() === CFG.kick,
+      mod: badges.includes('moderator'), vip: badges.includes('vip') });
+  };
+  ws.onclose = () => setTimeout(() => kickSocket(chatroom), 3000);
+  ws.onerror = () => {};
+}
+
+// ---------------- WebSocket bridges (TikFinity for TikTok, or any bridge for YouTube) ----------------
+function connectBridge(url, platform) {
+  let ws;
+  try { ws = new WebSocket(url); } catch (e) { return setTimeout(() => connectBridge(url, platform), 5000); }
+  ws.onmessage = (ev) => {
+    let o; try { o = JSON.parse(ev.data); } catch { return; }
+    const type = (o.event || o.type || '').toString().toLowerCase(), d = o.data || o;
+    if (type && !['chat', 'comment', 'message', 'chatmessage'].includes(type)) return;
+    const name = d.nickname || d.uniqueId || d.displayName || d.chatname || d.user?.nickname || d.user?.uniqueId || d.user?.name || d.username;
+    const text = d.comment || d.message || d.text || d.chatmessage;
+    if (name && typeof text === 'string')
+      handleChat({ name, text, platform, owner: !!(d.isOwner || d.isStreamer || d.isBroadcaster || d.isChatOwner),
+        mod: !!(d.isModerator || d.isMod || d.isChatModerator) });
+  };
+  ws.onclose = () => setTimeout(() => connectBridge(url, platform), 3000);
+  ws.onerror = () => {};
+}
+
+// ---------------- YouTube (Data API v3 polling) ----------------
+async function connectYouTube(videoId, key) {
+  const API = 'https://www.googleapis.com/youtube/v3/';
+  const retry = () => setTimeout(() => connectYouTube(videoId, key), 30000);
+  let chatId;
+  try {
+    const r = await fetch(`${API}videos?part=liveStreamingDetails&id=${encodeURIComponent(videoId)}&key=${encodeURIComponent(key)}`);
+    chatId = (await r.json()).items?.[0]?.liveStreamingDetails?.activeLiveChatId;
+    if (!chatId) { console.warn('[duel] YouTube: no active live chat for', videoId); return retry(); }
+  } catch (e) { return retry(); }
+  let pageToken = '', first = true;
+  const poll = async () => {
+    let wait = CFG.ytpoll * 1000;
+    try {
+      const r = await fetch(`${API}liveChat/messages?liveChatId=${encodeURIComponent(chatId)}&part=snippet,authorDetails&maxResults=200&key=${encodeURIComponent(key)}${pageToken ? '&pageToken=' + pageToken : ''}`);
+      const j = await r.json();
+      if (j.error) { if (r.status === 403 || r.status === 404) return retry(); wait = 15000; }
+      else {
+        pageToken = j.nextPageToken || pageToken;
+        wait = Math.max(wait, j.pollingIntervalMillis || 0);
+        // (the backlog from before connecting is skipped)
+        if (!first) for (const it of j.items || []) if (it.snippet?.displayMessage)
+          handleChat({ name: it.authorDetails?.displayName, text: it.snippet.displayMessage, platform: 'youtube',
+            owner: !!it.authorDetails?.isChatOwner, mod: !!it.authorDetails?.isChatModerator });
+        first = false;
+      }
+    } catch (e) { wait = 15000; }
+    setTimeout(poll, wait);
+  };
+  poll();
+}
+const ytId = (v) => (/(?:v=|youtu\.be\/|live\/)([\w-]{11})/.exec(v) || [])[1] || v;
+
+// ---------------- demo chat ----------------
+const DEMO = [['DustyBoots', '#ff7f50'], ['Calamity_Jane', '#9acd32'], ['SheriffSam', '#1e90ff'], ['LassoLou', '#ff69b4'],
+  ['TexTheTerrible', '#daa520'], ['WhiskeyPete', '#8a2be2'], ['Tumbleweed42', '#00ff7f'], ['DocHolly', '#ff4500']];
+function runDemoDuel() {
+  if (busy) return;
+  const a = pick(DEMO); let b = pick(DEMO);
+  while (b === a) b = pick(DEMO);
+  remember(b[0], b[1], b[0], 'demo');
+  handleChat({ name: a[0], color: a[1], text: CFG.cmd + ' @' + b[0], platform: 'demo', owner: true });
+}
+
+// ---------------- host bar and settings window ----------------
+const hostEl = document.createElement('form');
+hostEl.id = 'host';
+hostEl.innerHTML = `<input name="a" placeholder="challenger" spellcheck="false" autocomplete="off"><span>vs</span><input name="b" placeholder="opponent" spellcheck="false" autocomplete="off"><button class="btn go">Duel!</button><button class="btn" type="button" data-h="stop">Stop</button>`;
+document.body.appendChild(hostEl);
+hostEl.addEventListener('submit', e => {
+  e.preventDefault();
+  const a = cleanName(hostEl.a.value) || CFG.channel || CFG.kick || 'You', b = cleanName(hostEl.b.value) || pick(DEMO)[0];
+  const why = challenge(a, recent.get(a.toLowerCase())?.color, b, { force: true });
+  if (why === 'busy') toast('A duel is already on — Stop ends it');
+  else if (why === 'self') toast('Pick two different names');
+});
+hostEl.addEventListener('click', e => { if (e.target.dataset?.h === 'stop') stop(); });
+
+// Open it from OBS: right-click the source → Interact, move the mouse, click the gear.
+(function settingsUI() {
+  const gear = document.createElement('button');
+  gear.id = 'gear'; gear.title = 'Duel settings';
+  gear.innerHTML = `<svg viewBox="0 0 24 24" fill="#fff" stroke="#111" stroke-width="1.8" stroke-linejoin="round"><path d="M10.3 2h3.4l.5 2.6 1.9.8 2.2-1.5 2.4 2.4-1.5 2.2.8 1.9 2.6.5v3.4l-2.6.5-.8 1.9 1.5 2.2-2.4 2.4-2.2-1.5-1.9.8-.5 2.6h-3.4l-.5-2.6-1.9-.8-2.2 1.5-2.4-2.4 1.5-2.2-.8-1.9L2 13.7v-3.4l2.6-.5.8-1.9-1.5-2.2 2.4-2.4 2.2 1.5 1.9-.8z"/><circle cx="12" cy="12" r="3.2" fill="#ffe600"/></svg>`;
+  document.body.appendChild(gear);
+
+  const panel = document.createElement('div');
+  panel.id = 'settings';
+  panel.innerHTML = `<div class="sp" role="dialog" aria-label="Duel settings">
+    <div class="sp-head"><h2>Duel — Settings</h2>
+      <p>Saved in this browser source and applied when you press <b>Save &amp; apply</b>. Heads up: this window shows on stream while it's open.</p></div>
+    <div class="sp-body"></div>
+    <div class="sp-foot">
+      <button class="btn" data-act="test">Test duel</button>
+      <button class="btn" data-act="link">Copy setup link</button>
+      <button class="btn warn" data-act="defaults">Defaults</button>
+      <span class="sp-msg grow"></span>
+      <button class="btn" data-act="close">Cancel</button>
+      <button class="btn go" data-act="save">Save &amp; apply</button>
+      <input class="sp-link" readonly>
+    </div></div>`;
+  document.body.appendChild(panel);
+  const body = panel.querySelector('.sp-body'), msg = panel.querySelector('.sp-msg'), linkBox = panel.querySelector('.sp-link');
+  const inputs = {};
+
+  let sec = null;
+  for (const f of FIELDS) {
+    if (f.sec) {
+      sec = document.createElement('div'); sec.className = 'sp-sec';
+      const h = document.createElement('h3'); h.textContent = f.sec; sec.appendChild(h);
+      body.appendChild(sec); continue;
+    }
+    const wrapF = document.createElement('div'); wrapF.className = 'sp-f';
+    const id = 'sp-' + f.k;
+    const lab = document.createElement('label'); lab.htmlFor = id; lab.textContent = f.label;
+    let inp;
+    if (f.type === 'bool') {
+      const row = document.createElement('div'); row.className = 'sp-row';
+      const sw = document.createElement('span'); sw.className = 'sw';
+      inp = document.createElement('input'); inp.type = 'checkbox';
+      sw.append(inp, document.createElement('i'));
+      row.append(lab, sw); wrapF.appendChild(row);
+    } else if (f.type === 'select') {
+      inp = document.createElement('select');
+      for (const [v, t] of f.opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; inp.appendChild(o); }
+      wrapF.append(lab, inp);
+    } else {
+      inp = document.createElement('input');
+      inp.type = f.type === 'num' ? 'number' : f.type;
+      if (f.type === 'num') { inp.min = f.min; inp.max = f.max; inp.step = f.step; }
+      if (f.ph) inp.placeholder = f.ph;
+      inp.spellcheck = false; inp.autocomplete = 'off';
+      wrapF.append(lab, inp);
+    }
+    inp.id = id;
+    if (f.help) { const sm = document.createElement('small'); sm.textContent = f.help; wrapF.appendChild(sm); }
+    if (f.k in fromURL) {
+      inp.disabled = true;
+      const sm = document.createElement('small'); sm.className = 'url';
+      sm.textContent = 'Set by the source URL, which overrides this.';
+      wrapF.appendChild(sm);
+    }
+    inputs[f.k] = inp;
+    sec.appendChild(wrapF);
+  }
+
+  const fill = (vals) => {
+    for (const [k, inp] of Object.entries(inputs)) {
+      const v = vals[k];
+      if (FIELD[k].type === 'bool') inp.checked = !!v; else inp.value = v;
+    }
+  };
+  const read = () => {
+    const out = {};
+    for (const [k, inp] of Object.entries(inputs)) out[k] = coerce(FIELD[k], FIELD[k].type === 'bool' ? inp.checked : inp.value);
+    return out;
+  };
+  const open = () => {
+    fill(SET);
+    msg.textContent = storageOK ? '' : 'This browser source can\'t save settings — use "Copy setup link" instead.';
+    linkBox.style.display = 'none';
+    panel.classList.add('open');
+  };
+  const close = () => panel.classList.remove('open');
+
+  gear.addEventListener('click', open);
+  panel.addEventListener('mousedown', e => { if (e.target === panel) close(); });
+  addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+
+  panel.querySelector('.sp-foot').addEventListener('click', e => {
+    const act = e.target.dataset && e.target.dataset.act;
+    if (!act) return;
+    if (act === 'close') close();
+    if (act === 'test') {
+      const vals = read();
+      stop();
+      challenge(vals.channel || vals.kick || 'You', null, pick(DEMO)[0], { force: true });
+      close();
+    }
+    if (act === 'defaults') {
+      const d = {}; for (const f of Object.values(FIELD)) d[f.k] = f.def;
+      fill(d); msg.textContent = 'Defaults filled in — press Save & apply to keep them.';
+    }
+    if (act === 'link') {
+      const vals = read(), q = new URLSearchParams();
+      for (const f of Object.values(FIELD)) {
+        const v = vals[f.k];
+        if (v === f.def) continue;
+        q.set(f.k, f.type === 'bool' ? (v ? '1' : '0') : String(v));
+      }
+      const link = location.href.split(/[?#]/)[0] + (q.toString() ? '?' + q.toString() : '');
+      linkBox.value = link; linkBox.style.display = 'block'; linkBox.select();
+      const done = () => { msg.textContent = 'Setup link copied' + (vals.ytkey ? ' (it includes your YouTube API key — keep it private).' : '.'); };
+      try { navigator.clipboard.writeText(link).then(done, () => { document.execCommand('copy'); done(); }); }
+      catch (err) { try { document.execCommand('copy'); done(); } catch (e2) { msg.textContent = 'Copy the link from the box below.'; } }
+    }
+    if (act === 'save') {
+      try {
+        const vals = read();
+        // fields locked by the URL keep whatever was saved before (the URL value isn't a choice made here)
+        for (const k in fromURL) { if (k in saved) vals[k] = coerce(FIELD[k], saved[k]); else delete vals[k]; }
+        localStorage.setItem(STORE_KEY, JSON.stringify(vals));
+        msg.textContent = 'Saved! Reloading…';
+        setTimeout(() => location.reload(), 250);
+      } catch (err) {
+        msg.textContent = 'Couldn\'t save here — use "Copy setup link" and paste it as the source URL.';
+      }
+    }
+  });
+
+  // the buttons only appear while a mouse is over the overlay (i.e. in OBS's Interact window)
+  let mt;
+  addEventListener('mousemove', () => {
+    document.body.classList.add('mouse');
+    clearTimeout(mt); mt = setTimeout(() => document.body.classList.remove('mouse'), 3000);
+  });
+  document.addEventListener('mouseleave', () => document.body.classList.remove('mouse'));
+})();
+
+layout();
+addEventListener('resize', () => { if (!busy) layout(); });
+if (CFG.channel) connectTwitch(CFG.channel);
+if (CFG.kick) connectKick(CFG.kick);
+if (CFG.tiktok) connectBridge(CFG.tiktok, 'tiktok');
+if (CFG.youtube) {
+  if (/^wss?:\/\//i.test(CFG.youtube)) connectBridge(CFG.youtube, 'youtube');
+  else if (CFG.ytkey) connectYouTube(ytId(CFG.youtube), CFG.ytkey);
+  else console.warn('[duel] youtube= needs ytkey= (or a ws:// bridge URL)');
+}
+if (CFG.demo) setTimeout(runDemoDuel, 800);
+if (!CFG.channel && !CFG.kick && !CFG.tiktok && !CFG.youtube && !CFG.demo)
+  toast('No chat connected yet: move the mouse over the overlay and click the gear, or add ?channel=yourchannel');
+</script>
+</body>
+</html>
