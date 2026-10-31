@@ -40,7 +40,10 @@
     pronouns  1 = look up Twitch chatters' pronouns at pronouns.alejo.io to pick a cowboy or cowgirl (default 1)
 
   Look:
-    pixel     screen pixels per art pixel (default 0 = about 1/150 of the source's height: 7 at 1080p)
+    layout    box (default) = in a small box along the bottom of the screen, in the middle; wide = the whole screen
+    boxsize   how wide the small box is, % of the screen (default 40)
+    pixel     screen pixels per art pixel (default 0 = about 1/150 of the source's height: 7 at 1080p; in the box,
+              whatever fills it)
     names     1 = show the duelers' names (default 1)
     hold      seconds the winner stays up before it all goes away (default 4)
     volume    0-100 sound effects (default 50; 0 = silent)
@@ -65,11 +68,11 @@
 
   /* ---------- names and banners, over the scene ---------- */
   #ui{position:fixed;inset:0;pointer-events:none;z-index:2}
-  .nm{position:absolute;left:0;top:0;translate:-50% -100%;white-space:nowrap;max-width:40vw;overflow:hidden;text-overflow:ellipsis;
+  .nm{position:absolute;left:0;top:0;translate:-50% -100%;white-space:nowrap;max-width:calc(var(--boxw,100vw) * .45);overflow:hidden;text-overflow:ellipsis;
     font:600 calc(var(--p) * 6)/1.1 'Pixelify Sans',monospace;color:var(--c,#fff);padding:0 calc(var(--p) * .6);
     text-shadow:var(--ol);opacity:0;transition:opacity .3s}
   .nm.on{opacity:1}
-  #ban{position:absolute;left:50%;top:0;translate:-50% -100%;text-align:center;white-space:nowrap}
+  #ban{position:absolute;left:50%;top:0;translate:-50% -100%;text-align:center;width:max-content;max-width:calc(var(--boxw,100vw) * .96);text-wrap:balance}
   #ban b{display:block;font:400 calc(var(--p) * 13)/1 'Rye',serif;color:#ffe9b0;letter-spacing:.02em;
     text-shadow:var(--ol),0 calc(var(--p) * 1.2) 0 #1c120c}
   #ban small{display:block;margin-top:calc(var(--p) * 1.4);font:600 calc(var(--p) * 6)/1.1 'Pixelify Sans',monospace;color:#bfeeff;text-shadow:var(--ol)}
@@ -177,7 +180,10 @@ const FIELDS = [
     help: "Looks up Twitch chatters' pronouns (from the Chat Pronouns extension, pronouns.alejo.io): she/her gets a cowgirl, he/him a cowboy, anyone else either." },
   { k: 'allow', label: 'These people can too', type: 'text', def: '', ph: 'friend1, friend2', help: 'Names that can start a duel whatever "Who can start one" says.' },
   { sec: 'Look' },
-  { k: 'pixel', label: 'Pixel size', type: 'num', def: 0, min: 0, max: 16, step: 1, help: 'Screen pixels per art pixel: bigger is chunkier. 0 = automatic (7 at 1080p).' },
+  { k: 'layout', label: 'Where it shows', type: 'select', def: 'box', opts: [['box', 'A small box at the bottom centre'], ['wide', 'The whole screen']],
+    help: 'The small box keeps everything in a little window along the bottom of the screen. The whole screen is bigger, with the sky and lights going right up to the top.' },
+  { k: 'boxsize', label: 'Box width (% of the screen)', type: 'num', def: 40, min: 15, max: 100, step: 1, help: 'How wide the small box is.' },
+  { k: 'pixel', label: 'Pixel size', type: 'num', def: 0, min: 0, max: 16, step: 1, help: 'Screen pixels per art pixel: bigger is chunkier. 0 = automatic (7 at 1080p, or whatever fills the small box).' },
   { k: 'names', label: "Show the duelers' names", type: 'bool', def: true },
   { k: 'hold', label: 'Winner stays up for (s)', type: 'num', def: 4, min: 1, max: 30, step: 0.5 },
   { k: 'volume', label: 'Sound effects volume', type: 'num', def: 50, min: 0, max: 100, step: 5, help: '0 = silent.' },
@@ -838,10 +844,18 @@ const SHADOW_MAT = new THREE.MeshBasicMaterial({ color: 0x1a0a20, transparent: t
 const PUDDLE_MAT = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: .72, depthWrite: false });
 let PX = 7, W = 2, H = 2, cssLeft = 0, cssTop = 0;
 
+// Across the whole bottom of the screen, or in a small box at the bottom centre (`layout=box`).
+const BOXED = CFG.layout !== 'wide', BOX_W = 200, BOX_H = 100;
 // The canvas is drawn at one pixel per art pixel and blown up, so it stays crisp. One world unit = one pixel across.
 function layout() {
-  PX = CFG.pixel || Math.max(2, Math.round(innerHeight / 150));
-  W = Math.ceil(innerWidth / PX / 2) * 2; H = Math.ceil(innerHeight / PX / 2) * 2;
+  if (BOXED) {
+    // a little window of a fixed size (in art pixels) at the bottom centre: nothing ever draws outside it
+    PX = CFG.pixel || Math.max(1, Math.round(innerWidth * CFG.boxsize / 100 / BOX_W));
+    W = BOX_W; H = BOX_H;
+  } else {
+    PX = CFG.pixel || Math.max(2, Math.round(innerHeight / 150));
+    W = Math.ceil(innerWidth / PX / 2) * 2; H = Math.ceil(innerHeight / PX / 2) * 2;
+  }
   renderer.setSize(W, H, false);
   cssLeft = Math.floor((innerWidth - W * PX) / 2); cssTop = innerHeight - H * PX;
   Object.assign(canvas.style, { width: W * PX + 'px', height: H * PX + 'px', left: cssLeft + 'px', top: cssTop + 'px' });
@@ -853,6 +867,7 @@ function layout() {
   camera.lookAt(0, ty, 0);
   const r = document.documentElement.style, o = Math.max(2, Math.round(PX * .6));
   r.setProperty('--p', PX + 'px');
+  r.setProperty('--boxw', W * PX + 'px');
   r.setProperty('--ol', [[o, 0], [-o, 0], [0, o], [0, -o], [o, o], [-o, o], [o, -o], [-o, -o]].map(([x, y]) => `${x}px ${y}px 0 #1c120c`).join(','));
 }
 
@@ -972,7 +987,7 @@ function buildTown(r) {
   order.forEach((k, i) => {
     const [fn, half] = BUILDINGS[k], side = i % 2 ? 1 : -1, ring = i >> 1;
     const x = side > 0 ? right + 1 + half : left - 1 - half;
-    if (Math.abs(x) - half * .3 > W / 2) return;   // doesn't fit (a bit hanging off the edge is fine)
+    if (BOXED ? Math.abs(x) + half > W / 2 - 1 : Math.abs(x) - half * .3 > W / 2) return;   // doesn't fit (across the screen, a bit hanging off the edge is fine)
     add(fn(r), x, half, .4 + ring * .2);
     if (side > 0) right = x + half; else left = x - half;
   });
@@ -995,6 +1010,7 @@ function buildGlow(r) {
     // rings of color round a point low behind the town, fading out toward the edges and the top
     const dd = Math.hypot((x - gx) / (gw * .62), up / gh);
     let a = Math.pow(Math.max(0, 1 - dd), 1.4) * Math.min(1, up / 12) * .8;
+    if (BOXED) a *= Math.min(1, (x + 1) / 16, (gw - x) / 16);   // fading out at the box's sides
     a = Math.floor(a / .1 + th) * .1;   // posterized, dithered between steps
     let c = bands.find(b => dd < b[0])[1];
     // the sun, its lower half cut by stripes
@@ -1236,12 +1252,13 @@ function toCss(obj, x, y) {
 }
 function placeLabels() {
   cowboys.slice(0, 2).forEach((cb, i) => {
-    const el = $(i ? 'nB' : 'nA'), [x, y] = toCss(cb.root, 0, 25);
+    const el = $(i ? 'nB' : 'nA'), [x0, y] = toCss(cb.root, 0, 25), half = el.offsetWidth / 2;
+    const x = clamp(x0, cssLeft + half, cssLeft + W * PX - half);
     el.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
   });
   if (saloon) {
     const [x, y] = toCss(saloon.root, 0, 52);
-    $('ban').style.top = Math.max(8 + $('ban').offsetHeight, Math.round(y)) + 'px';
+    $('ban').style.top = Math.max(Math.max(cssTop, 0) + 8 + $('ban').offsetHeight, Math.round(y)) + 'px';
     $('ban').style.left = Math.round(x) + 'px';
   }
 }
