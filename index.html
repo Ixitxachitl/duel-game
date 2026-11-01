@@ -335,23 +335,9 @@ class VB {
   }
   geo() { return voxGeo([...this.m.values()]); }
 }
-// A flat sprite is a map of "x,y" → { c: color, d: depth, z0: front-to-back start }, extruded into cubes, with
-// an optional dark outline round its silhouette (the outline has the depth of whatever it borders).
+// A flat sprite is a map of "x,y" → { c: color, d: depth, z0: front-to-back start }, extruded into cubes.
 const ck = (x, y) => x + ',' + y;
-function spriteGeo(cells, outline) {
-  if (outline) {
-    const add = new Map();
-    for (const [k, cell] of cells) {
-      const [x, y] = k.split(',').map(Number);
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nk = ck(x + dx, y + dy);
-        if (y + dy < 0 || cells.has(nk)) continue;
-        const o = add.get(nk);
-        if (!o || o.d < cell.d) add.set(nk, { c: outline, d: cell.d, z0: cell.z0 });
-      }
-    }
-    for (const [k, v] of add) cells.set(k, v);
-  }
+function spriteGeo(cells) {
   const vox = [];
   for (const [k, { c, d, z0 }] of cells) {
     const [x, y] = k.split(',').map(Number), s = z0 ?? -(d >> 1);
@@ -631,7 +617,7 @@ function horseParts(r) {
 let horses = [];
 function makeHorse(x, z, yaw, r, delay) {
   const h = horseParts(r), m = model(x, z);
-  const part = (vb, parent) => { const o = new THREE.Mesh(vb.geo(), MAT); parent.add(o); return outlined(o); };
+  const part = (vb, parent) => { const o = new THREE.Mesh(vb.geo(), MAT); parent.add(o); return o; };
   part(h.body, m.inner);
   const head = new THREE.Group(); head.position.set(0, 12, 5); m.inner.add(head); part(h.head, head);
   const tail = new THREE.Group(); tail.position.set(0, 12, -7); m.inner.add(tail); part(h.tail, tail);
@@ -730,21 +716,8 @@ function gunVB(P) { const b = new VB(); b.box(-1, -8, -1, 0, -6, 0, P.G); b.box(
 function holsterVB(P, xs, grip) { const b = new VB(); b.box(xs, 2, -1, xs, 3, 0, P.O); if (grip) b.box(xs, 4, -1, xs, 4, 0, P.G); return b; }
 
 const YAW = 50 * Math.PI / 180;   // three-quarter view: the body turned sideways, the head turned back to you
-// A dark outline round a part, so the little people stand out from the busy buildings: a copy of the part a
-// pixel bigger all round, drawn inside out (only its far side shows, peeking out round the edges).
-const OUTLINE_MAT = new THREE.MeshBasicMaterial({ color: 0x1c120c, side: THREE.BackSide });
-const _bb = new THREE.Box3(), _sz = new THREE.Vector3(), _ct = new THREE.Vector3();
-function outlined(mesh, pad = 1) {
-  mesh.geometry.computeBoundingBox();
-  _bb.copy(mesh.geometry.boundingBox); _bb.getSize(_sz); _bb.getCenter(_ct);
-  const hull = new THREE.Mesh(mesh.geometry, OUTLINE_MAT);
-  for (const a of ['x', 'y', 'z']) { const k = (_sz[a] + pad * 2) / Math.max(_sz[a], 1e-3); hull.scale[a] = k; hull.position[a] = mesh.position[a] + _ct[a] * (1 - k); }
-  mesh.parent.add(hull);
-  mesh.hull = hull;
-  return mesh;
-}
-// swap a part's shape or colors, keeping its outline with it
-const setGeo = (mesh, geo) => { mesh.geometry = geo; if (mesh.hull) mesh.hull.geometry = geo; };
+// swap a part's shape or colors
+const setGeo = (mesh, geo) => { mesh.geometry = geo; };
 const yawOf = f => f > 0 ? YAW : f < 0 ? -YAW : 0;
 function makeCowboy(who, style, x, z, gunNot) {
   const look = cowboyLook(who, style, gunNot), dry = look.pal, wet = wetPal(dry);
@@ -754,7 +727,7 @@ function makeCowboy(who, style, x, z, gunNot) {
     torso: both(torsoVB), leg: both(legVB), arm: both(armVB), hat: both(P => hatVB(look, P)), gun: both(gunVB),
   };
   const m = model(x, z);
-  const mesh = (geo, parent, px = 0, py = 0, pz = 0) => { const o = new THREE.Mesh(geo, MAT); o.position.set(px, py, pz); parent.add(o); return outlined(o); };
+  const mesh = (geo, parent, px = 0, py = 0, pz = 0) => { const o = new THREE.Mesh(geo, MAT); o.position.set(px, py, pz); parent.add(o); return o; };
   const limb = (geo, px, py) => { const grp = new THREE.Group(); grp.position.set(px, py, 0); m.inner.add(grp); grp.part = mesh(geo, grp); return grp; };
   const headG = new THREE.Group(); m.inner.add(headG);
   const cb = {
@@ -772,10 +745,10 @@ function makeCowboy(who, style, x, z, gunNot) {
     const xs = side > 0 ? -3 : 2;
     cb.holster = [holsterVB(dry, xs, true).geo(), holsterVB(wet, xs, false).geo(), holsterVB(dry, xs, false).geo()];
     cb.holsterM = mesh(cb.holster[0], m.inner);
-    cb.gun = mesh(g.gun[0], cb.gunArm); cb.gun.visible = cb.gun.hull.visible = false;
+    cb.gun = mesh(g.gun[0], cb.gunArm); cb.gun.visible = false;
     cb.nozzle = new THREE.Object3D(); cb.nozzle.position.set(0, -9, 0); cb.gunArm.add(cb.nozzle);
   };
-  cb.draw = () => { cb.gun.visible = cb.gun.hull.visible = true; setGeo(cb.holsterM, cb.holster[cb.wetNow ? 1 : 2]); };
+  cb.draw = () => { cb.gun.visible = true; setGeo(cb.holsterM, cb.holster[cb.wetNow ? 1 : 2]); };
   cb.setFace = f => setGeo(cb.head, g.head[f]);
   cb.soak = () => {
     cb.wetNow = 1;
@@ -1083,14 +1056,14 @@ function buildProps(r, P, x0, x1) {
     const end = s > 0 ? x1 : x0;
     if (Math.abs(end) + 8 < lim) {
       const m = model(Math.round(end + s * range(6, 10, r)), -2 * Math.round(range(14, 17, r)));
-      m.inner.add(new THREE.Mesh(spriteGeo(saguaro(r), '#1d3018'), MAT));
+      m.inner.add(new THREE.Mesh(spriteGeo(saguaro(r)), MAT));
       prop(m.pivot, { delay: .7 + r() * .3, dur: .55, twist: pick([-1.2, 1.2], r) });
     }
     if (r() < .6) {
       const x = Math.round(s * range(P + 22, Math.max(P + 24, lim), r));
       if (Math.abs(x) > lim || x < x0 || x > x1) continue;
       const m = model(x, -2 * Math.round(range(1, 3, r)));
-      m.inner.add(new THREE.Mesh(spriteGeo(r() < .6 ? barrelCactus(r) : saguaro(r), '#1d3018'), MAT));
+      m.inner.add(new THREE.Mesh(spriteGeo(r() < .6 ? barrelCactus(r) : saguaro(r)), MAT));
       prop(m.pivot, { delay: .8 + r() * .3, dur: .55, twist: pick([-1.2, 1.2], r) });
     }
   }
